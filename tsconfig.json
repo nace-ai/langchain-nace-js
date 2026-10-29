@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+    "useDefineForClassFields": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "declaration": true,
+    "noEmit": true,
+    "types": ["node"],
+    "paths": {
+      "langchain-nace": ["./src/index.ts"],
+      "langchain-nace/middleware": ["./src/middleware/index.ts"]
+    }
+  },
+  "include": ["src", "tests", "examples", "scripts", "*.config.ts"]
+}

@@ -1,0 +1,65 @@
+name: Release
+
+# A v* tag builds, tests and smoke-tests the packed tarball, then publishes it to npm
+# through trusted publishing (OIDC): no npm token is stored. The npm package's trusted
+# publisher must name this repository, this workflow file and the environment below.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      NACE_API_KEY: ${{ secrets.NACE_API_KEY_LIVE }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches package.json
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "${GITHUB_REF_NAME}" = "v${version}" || { echo "tag ${GITHUB_REF_NAME} != v${version}"; exit 1; }
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm check:pack
+      - name: Install the packed tarball in a fresh project and run live checks
+        run: node scripts/smoke-pack.mjs
+      - run: npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: "*.tgz"
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@^11.5.1
+      # Provenance is signed through sigstore, which accepts only public source
+      # repositories; from a private repo npm answers 422, so it is skipped there.
+      # On npmjs.com the trusted publisher must allow "npm publish", not only
+      # "npm stage publish", or this step gets a 403.
+      - run: npm publish ./*.tgz --access public ${{ github.event.repository.private && '--provenance=false' || '--provenance' }}

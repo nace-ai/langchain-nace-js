@@ -1,0 +1,35 @@
+// `@langchain/typesafe` names, so switching is an import change.
+export {
+  Allow,
+  type ApprovalDecision,
+  AskHuman,
+  Block,
+  DEFAULT_DESTRUCTIVE,
+  DEFAULT_MATCHES_REQUEST,
+  DEFAULT_RISK,
+  type GateContext,
+  GateDecision,
+  type GatedToolCall,
+  type GatePolicy,
+  type GateQuestions,
+  type GateVerdict,
+  type NaceAutoModeMiddlewareConfig,
+  type NaceAutoModeMiddlewareConfig as AutoModeMiddlewareConfig,
+  naceAutoModeMiddleware,
+  naceAutoModeMiddleware as autoModeMiddleware,
+  type ScreenshotSource,
+  type ThresholdPolicyOptions,
+  type ToolApprovalRequest,
+  thresholdPolicy,
+  verdictFromResponse,
+  verdictSummary,
+} from "./autoMode.js";
+export { isInlineImage, latestImages, withoutMedia } from "./media.js";
+export {
+  type ModelChoice,
+  type NaceModelRoute,
+  type NaceModelRouterMiddlewareConfig,
+  type NaceModelRouterMiddlewareConfig as ModelRouterMiddlewareConfig,
+  naceModelRouterMiddleware,
+  naceModelRouterMiddleware as modelRouterMiddleware,
+} from "./modelRouter.js";

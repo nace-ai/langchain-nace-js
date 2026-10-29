@@ -1,0 +1,39 @@
+name: Live contract (nightly)
+
+# Runs the live suite against prod Drex on the newest LangChain and nace-sdk the
+# version ranges allow, so a breaking change upstream shows up before users hit it.
+
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    env:
+      NACE_API_KEY_LIVE: ${{ secrets.NACE_API_KEY_LIVE }}
+      NACE_API_KEY: ${{ secrets.NACE_API_KEY_LIVE }}
+      OPENROUTER_API_KEY_LIVE: ${{ secrets.OPENROUTER_API_KEY_LIVE }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm update
+      - run: pnpm list @langchain/core langchain @langchain/langgraph nace-sdk
+      - run: pnpm test
+      - run: pnpm test:int
+      - run: pnpm build
+      # The examples call Drex for real, so they need the key (absent until the secret is set).
+      - if: ${{ env.NACE_API_KEY != '' }}
+        run: npx tsx examples/support-agent.ts
+      - if: ${{ env.NACE_API_KEY != '' }}
+        run: npx tsx examples/langgraph-router.ts

@@ -45,10 +45,12 @@ describe.skipIf(!OPENROUTER_KEY)("OpenRouter", () => {
       openrouter("nace-ai/drex-v2.0", refund, `sk-or-v1-${"0".repeat(64)}`),
     );
     const unknown = await fail(openrouter("nace-ai/drex-v99.9", refund));
-    const tooMany: Questions = {};
-    for (let i = 0; i < 17; i += 1)
-      tooMany[`q${i}`] = { type: "noul", instructions: `mentions ${i}?` };
-    const many = await fail(openrouter("nace-ai/drex-max", tooMany));
+    const criteria = Object.fromEntries(Array.from({ length: 256 }, (_, i) => [`label${i}`, null]));
+    const many = await fail(
+      openrouter("nace-ai/drex-max", {
+        q: { type: "choice", instructions: "Which label?", criteria },
+      }),
+    );
     const badType = await fail(
       openrouter("nace-ai/drex-v2.0", { q: { type: "rank", criteria: ["a"] } }),
     );
@@ -61,7 +63,7 @@ describe.skipIf(!OPENROUTER_KEY)("OpenRouter", () => {
       expect(error.message).not.toContain("HTTP 4");
     }
     expect(unknown.message).toContain("does not exist");
-    expect(many.message).toContain("16");
+    expect(many.message).toContain("255");
     expect(badType.message).toContain("questions.q.type");
   });
 });

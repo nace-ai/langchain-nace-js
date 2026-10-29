@@ -86,8 +86,8 @@ export interface NaceClassifierFields {
   questions?: Questions;
   /**
    * Drex model id, sent as given. Defaults to `NACE_DEFAULT_DECISION_MODEL`,
-   * else `drex-max` (reads images; up to 16 questions per request). Use
-   * `drex-v2.0` for text-only batches of up to 512 questions.
+   * else `drex-max` (reads images; up to 512 questions per request).
+   * `drex-v2.0` is text-only and has the same question-count limit.
    */
   model?: string;
   /** Provider key. Defaults to `NACE_API_KEY` only on supported Nace HTTPS hosts. */

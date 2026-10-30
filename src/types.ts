@@ -6,7 +6,7 @@
  */
 import * as z from "zod/v4";
 
-import { NaceAPIResponseValidationError, NaceError } from "./errors.js";
+import { clip, NaceAPIResponseValidationError, NaceError } from "./errors.js";
 
 /** Any value expressible in JSON. */
 export type JsonValue =
@@ -376,31 +376,41 @@ function pick<T extends Answer>(answers: Record<string, Answer | RawAnswer>, typ
   return out;
 }
 
+/** A question id for a message: quoted, escaped, and cut to 64 characters. */
+function quoted(id: string): string {
+  return JSON.stringify(clip(id, 65));
+}
+
 /**
  * Check that the answers fit the questions that were asked. Extra answer ids and
  * answers to question types this package doesn't know are left alone.
+ *
+ * Messages name the question and the question's own type, never text the response
+ * supplied (an answer's type, a choice, a legend), so a bad response can't push its
+ * content into logs.
  */
 function checkAnswered(
   answers: Record<string, Answer | RawAnswer>,
   asked: Record<string, Record<string, unknown>>,
 ): void {
   for (const [id, question] of Object.entries(asked)) {
+    const name = quoted(id);
     if (!Object.hasOwn(answers, id)) {
-      throw new NaceAPIResponseValidationError(`Drex returned no answer for question "${id}".`);
+      throw new NaceAPIResponseValidationError(`Drex returned no answer for question ${name}.`);
     }
     const answer = answers[id] as Answer | RawAnswer;
     const type = question.type;
     if (type !== "noul" && type !== "choice" && type !== "score") continue;
     if (answer.type !== type) {
       throw new NaceAPIResponseValidationError(
-        `Drex returned a "${answer.type}" answer for question "${id}", which asked for "${type}".`,
+        `Drex's answer to question ${name} has the wrong type (expected ${type}).`,
       );
     }
     const criteria = question.criteria;
     if (type === "choice" && isRecord(criteria)) {
       if (!Object.hasOwn(criteria, (answer as ChoiceAnswer).choice)) {
         throw new NaceAPIResponseValidationError(
-          `Drex answered question "${id}" with a choice that was not offered.`,
+          `Drex answered question ${name} with a choice that was not offered.`,
         );
       }
     }
@@ -408,7 +418,7 @@ function checkAnswered(
       const levels = Object.keys((answer as ScoreAnswer).legend).length;
       if (levels !== criteria.length) {
         throw new NaceAPIResponseValidationError(
-          `Drex answered question "${id}" with a score legend of ${levels} levels, ` +
+          `Drex answered question ${name} with a score legend of ${levels} levels, ` +
             `but the rubric has ${criteria.length}.`,
         );
       }

@@ -38,12 +38,41 @@ function classifier(questions: Record<string, unknown>, answers: Record<string, 
 describe("answers match the questions asked", () => {
   it.each([
     ["a missing answer", {}, /no answer for question "q"/],
-    ["the wrong type", { q: picked("a") }, /"choice" answer for question "q".*"noul"/],
+    [
+      "the wrong type",
+      { q: picked("a") },
+      /^Drex's answer to question "q" has the wrong type \(expected noul\)\.$/,
+    ],
   ])("refuses %s", async (_name, answers, message) => {
     const c = classifier({ q: { type: "noul", instructions: "?" } }, answers);
     const error = await c.invoke("x").catch((e) => e);
     expect(error).toBeInstanceOf(NaceAPIResponseValidationError);
     expect(error.message).toMatch(message);
+  });
+
+  it("keeps a response's own text out of the message", async () => {
+    const huge = "x".repeat(200_000);
+    const c = classifier({ q: { type: "noul", instructions: "?" } }, { q: { type: huge } });
+    const error = await c.invoke("x").catch((e) => e);
+    expect(error).toBeInstanceOf(NaceAPIResponseValidationError);
+    expect(error.message.length).toBeLessThan(300);
+    expect(error.message).not.toContain("xxxxxxxxxx");
+    expect(error.message).toBe(`Drex's answer to question "q" has the wrong type (expected noul).`);
+  });
+
+  it("bounds a question id and quotes it", async () => {
+    const long = "q".repeat(500);
+    const noul = { type: "noul", instructions: "?" };
+    const tooLong = await classifier({ [long]: noul }, {})
+      .invoke("x")
+      .catch((e) => e);
+    expect(tooLong.message).toBe(
+      `Drex returned no answer for question ${JSON.stringify(`${"q".repeat(64)}…`)}.`,
+    );
+    const odd = await classifier({ 'a"\nb': noul }, {})
+      .invoke("x")
+      .catch((e) => e);
+    expect(odd.message).toBe('Drex returned no answer for question "a\\"\\nb".');
   });
 
   it("refuses a choice that was not offered", async () => {
@@ -63,6 +92,7 @@ describe("answers match the questions asked", () => {
     const error = await c.invoke("x").catch((e) => e);
     expect(error).toBeInstanceOf(NaceAPIResponseValidationError);
     expect(error.message).toMatch(/"q"/);
+    expect(error.message).not.toContain("level 5");
   });
 
   it("accepts extra answer ids, offered choices and a matching legend", async () => {

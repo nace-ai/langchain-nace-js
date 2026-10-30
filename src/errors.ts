@@ -274,7 +274,7 @@ const MAX_MESSAGE_CHARS = 500;
 /** The billing link and the request id, which are kept, are cut to this many. */
 const MAX_GUIDANCE_CHARS = 350;
 
-function clip(text: string, max: number): string {
+export function clip(text: string, max: number): string {
   if (text.length <= max) return text;
   let end = max - 1;
   // Don't leave half of a surrogate pair at the cut.

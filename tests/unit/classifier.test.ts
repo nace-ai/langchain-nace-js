@@ -386,7 +386,7 @@ describe("errors and retries", () => {
             type: "invalid_request_error",
             message: "Invalid request",
             issues: [
-              { path: "questions", message: "Drex Max allows at most 16 questions." },
+              { path: "questions", message: "Drex Max allows at most 512 questions." },
               { path: "images.0", message: "not an image" },
             ],
           },
@@ -400,7 +400,7 @@ describe("errors and retries", () => {
     expect(NaceUnprocessableEntityError.isInstance(error)).toBe(true);
     expect(error.message).toBe(
       "Drex returned 422: Invalid request\n" +
-        "  questions: Drex Max allows at most 16 questions.\n" +
+        "  questions: Drex Max allows at most 512 questions.\n" +
         "  images.0: not an image\n" +
         "(request_id=req_header)",
     );

@@ -1,6 +1,10 @@
 import { ensureConfig, mergeConfigs, RunnableLambda } from "@langchain/core/runnables";
 import { expect, it } from "vitest";
-import { NaceBatchStoppedError, NaceClassifier } from "../../src/index.js";
+import {
+  type ClassificationResponse,
+  NaceBatchStoppedError,
+  NaceClassifier,
+} from "../../src/index.js";
 import { fakeDrex, okBody, type Reply } from "./helpers.js";
 
 const questions = { q: { type: "noul" as const, instructions: "Urgent?" } };
@@ -573,9 +577,11 @@ it("keeps independently started batches apart", async () => {
   expect(server.requests.map((r) => r.body.state)).toEqual(["a", "b", "c"]);
 });
 
-// A 401, 402 or 403 means the classifier's key or account can't be used, so it stops
-// every batch running on that classifier, requests made from callbacks included.
-it("stops a request a concurrent batch's callback makes after another batch's 401", async () => {
+// A 401, 402 or 403 stops the batch it happens in and the batches nested in it; another
+// batch running at the same time stops at its own first one. A background callback
+// handler runs on LangChain's shared queue, so it can inherit the stopped state of the
+// batch whose callback held the queue: a call made from it is then refused, unsent.
+it("refuses, unsent, a call a callback makes while another batch's stopped state holds the shared queue", async () => {
   const gate = deferred();
   const auxDone = deferred();
   let aux: any;
@@ -603,6 +609,55 @@ it("stops a request a concurrent batch's callback makes after another batch's 40
   expect(aux.error).toBeInstanceOf(NaceBatchStoppedError);
   expect(aux.error.cause).toBe(first.error);
   expect(server.requests.map((r) => r.body.state)).toEqual(["a", "b"]);
+});
+
+// Batches that overlap in time: B's start callback holds its inputs back while the
+// independently started batch A gets a 401. A's stop does not reach B.
+async function overlapping(bReply: (body: any) => Reply, bInputs: string[]) {
+  const gate = deferred();
+  const entered = deferred();
+  const holding = {
+    awaitHandlers: true,
+    handleChainStart: async () => {
+      entered.resolve();
+      await gate.promise;
+    },
+  };
+  const answer = (body: any) => (body.state === "a" ? status(401) : bReply(body));
+  const { server, classifier: c } = classifier(Array.from({ length: 4 }, () => answer));
+  const b = settled(
+    c.batch(
+      bInputs,
+      { maxConcurrency: 1, callbacks: [holding] },
+      {
+        returnExceptions: true,
+      },
+    ) as Promise<(ClassificationResponse | Error)[]>,
+  );
+  await entered.promise;
+  const a: any = await settled(c.batch(["a"]));
+  expect(String(a.error)).toContain("401");
+  expect(server.requests.map((r) => r.body.state)).toEqual(["a"]);
+  gate.resolve();
+  const out = await b;
+  await settle();
+  return { out: (out as { value: (ClassificationResponse | Error)[] }).value, server };
+}
+
+it("sends an overlapping batch's inputs after another batch's 401", async () => {
+  const { out, server } = await overlapping(ok, ["b1", "b2"]);
+  expect(server.requests.map((r) => r.body.state)).toEqual(["a", "b1", "b2"]);
+  expect(out.filter((r) => r instanceof Error)).toHaveLength(0);
+});
+
+it("stops an overlapping batch at its own first 401, not before", async () => {
+  const { out, server } = await overlapping(() => status(401), ["b1", "b2", "b3"]);
+  expect(server.requests.map((r) => r.body.state)).toEqual(["a", "b1"]);
+  expect(String(out[0])).toContain("401");
+  expect(out[1]).toBeInstanceOf(NaceBatchStoppedError);
+  expect(out[2]).toBeInstanceOf(NaceBatchStoppedError);
+  // Their stop names B's own failure, not A's.
+  expect((out[1] as Error).cause).toBe(out[0]);
 });
 
 it.each([false, true])(

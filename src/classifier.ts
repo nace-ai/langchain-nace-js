@@ -425,7 +425,7 @@ export class NaceClassifier extends Runnable<
         // or future question types); the wire form here is Drex's own.
         .systemOne(request as never, { signal: options?.signal })
         .withResponse();
-      return parseResponse(data, requestId ?? undefined);
+      return parseResponse(data, requestId ?? undefined, prepared.questions);
     } catch (error) {
       throw convertError(error, this.provider);
     }

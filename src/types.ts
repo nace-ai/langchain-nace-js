@@ -376,8 +376,58 @@ function pick<T extends Answer>(answers: Record<string, Answer | RawAnswer>, typ
   return out;
 }
 
-/** Build a response from a Drex response body, keeping unknown answer types. */
-export function parseResponse(body: unknown, requestId?: string): ClassificationResponse {
+/**
+ * Check that the answers fit the questions that were asked. Extra answer ids and
+ * answers to question types this package doesn't know are left alone.
+ */
+function checkAnswered(
+  answers: Record<string, Answer | RawAnswer>,
+  asked: Record<string, Record<string, unknown>>,
+): void {
+  for (const [id, question] of Object.entries(asked)) {
+    if (!Object.hasOwn(answers, id)) {
+      throw new NaceAPIResponseValidationError(`Drex returned no answer for question "${id}".`);
+    }
+    const answer = answers[id] as Answer | RawAnswer;
+    const type = question.type;
+    if (type !== "noul" && type !== "choice" && type !== "score") continue;
+    if (answer.type !== type) {
+      throw new NaceAPIResponseValidationError(
+        `Drex returned a "${answer.type}" answer for question "${id}", which asked for "${type}".`,
+      );
+    }
+    const criteria = question.criteria;
+    if (type === "choice" && isRecord(criteria)) {
+      if (!Object.hasOwn(criteria, (answer as ChoiceAnswer).choice)) {
+        throw new NaceAPIResponseValidationError(
+          `Drex answered question "${id}" with a choice that was not offered.`,
+        );
+      }
+    }
+    if (type === "score" && Array.isArray(criteria)) {
+      const levels = Object.keys((answer as ScoreAnswer).legend).length;
+      if (levels !== criteria.length) {
+        throw new NaceAPIResponseValidationError(
+          `Drex answered question "${id}" with a score legend of ${levels} levels, ` +
+            `but the rubric has ${criteria.length}.`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Build a response from a Drex response body, keeping unknown answer types.
+ *
+ * With `asked` (the questions as sent), every asked question must have an answer
+ * of its own type, a choice must be one of the labels offered, and a score's
+ * legend must be as long as the rubric asked.
+ */
+export function parseResponse(
+  body: unknown,
+  requestId?: string,
+  asked?: Record<string, Record<string, unknown>>,
+): ClassificationResponse {
   if (!isRecord(body)) {
     throw new NaceAPIResponseValidationError("Drex returned a body that isn't a JSON object.");
   }
@@ -386,6 +436,7 @@ export function parseResponse(body: unknown, requestId?: string): Classification
   for (const [id, raw] of Object.entries(rawAnswers)) {
     setOwn(answers, id, parseAnswer(raw));
   }
+  if (asked !== undefined) checkAnswered(answers, asked);
   const rawUsage = isRecord(body.usage) ? body.usage : {};
   const usage: Usage = {};
   if (typeof rawUsage.input_tokens === "number") usage.inputTokens = rawUsage.input_tokens;

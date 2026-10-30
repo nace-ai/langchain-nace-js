@@ -163,14 +163,16 @@ it("accepts valid boundary values and preserves all typed special answer IDs", a
     }),
   );
   for (const [kind, value] of Object.entries(raw)) {
+    // The asked question has its own answer; the special ids are extra answers.
     const answers = Object.fromEntries([
+      ["q", { type: "other" }],
       ["__proto__", value],
       ["constructor", value],
     ]);
     const server = fakeDrex([(body) => ({ body: okBody(body, answers) })]);
     const response = await new NaceClassifier(
       offline(server.fetch, {
-        questions: { q: { type: "noul", instructions: "?" } },
+        questions: { q: { type: "other", instructions: "?" } as never },
       }),
     ).invoke("x");
     const typed =

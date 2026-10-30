@@ -2,7 +2,14 @@
 import { readFileSync } from "node:fs";
 import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
-import { Command, interrupt, isGraphBubbleUp, MemorySaver, task } from "@langchain/langgraph";
+import {
+  Command,
+  getConfig,
+  interrupt,
+  isGraphBubbleUp,
+  MemorySaver,
+  task,
+} from "@langchain/langgraph";
 import { createAgent, createMiddleware } from "langchain";
 import { expect, it, vi } from "vitest";
 import * as z from "zod/v4";
@@ -846,4 +853,123 @@ it("does not carry an id-keyed approval over to a call edited with updateState",
   expect(again.__interrupt__[0].value.args).toEqual({ target: "secret" });
   expect(again.__interrupt__[0].id).not.toBe(original);
   expect(server.requests).toHaveLength(2);
+});
+
+// Capturing the gate's input (screenshots) is part of the check. It happens inside the
+// decision's task on a first run, so a capture failure is a failed check like any other:
+// "throw" fails the step, "block" is saved and replays as the same block.
+
+/** A screenshot source that fails on the listed calls (1-based) and counts every call. */
+function flakyScreens(failOn: (call: number) => boolean) {
+  const seen = { calls: 0, namespaces: [] as unknown[] };
+  const source = () => {
+    seen.calls += 1;
+    seen.namespaces.push(getConfig()?.configurable?.checkpoint_ns);
+    if (failOn(seen.calls)) throw new Error("screen unavailable");
+    return [RED];
+  };
+  return { seen, source };
+}
+
+it("keeps an id-keyed rejection of a nested approval after a failed screenshot capture and an outer retry", async () => {
+  const server = fakeDrex([ALLOW, ALLOW]);
+  const saver = new MemorySaver();
+  const ran: string[] = [];
+  const config = { configurable: { thread_id: "capture-nested-review" } };
+  const screens = flakyScreens((call) => call === 1);
+  const gate = { policy: () => new Review(), screenshots: screens.source };
+  const agent = retrying(server, saver, ran, [sendCall(), new AIMessage("done")], gate);
+  // The failed capture fails the gate's task and with it the run, though an outer middleware
+  // catches the error and keeps going.
+  await expect(
+    agent.invoke({ messages: [new HumanMessage("Send the report")] }, config),
+  ).rejects.toThrow();
+  expect(ran).toEqual([]);
+  const paused = await agent.invoke(null as any, config);
+  expect((paused as any).__interrupt__).toHaveLength(1);
+  expect((paused as any).__interrupt__[0].value).toEqual({ kind: "review" });
+  const id = (paused as any).__interrupt__[0].id;
+  await retrying(server, saver, ran, [new AIMessage("done")], gate).invoke(
+    new Command({ resume: { [id]: { type: "reject" } } }),
+    config,
+  );
+  expect(ran).toEqual([]);
+  expect(server.requests).toHaveLength(1);
+});
+
+it("with onError: 'block' a failed screenshot capture is a saved block that a rebuild replays", async () => {
+  const server = fakeDrex([ALLOW]);
+  const saver = new MemorySaver();
+  const ran: string[] = [];
+  const screens = flakyScreens((call) => call === 1);
+  const pauseAfter = createMiddleware({
+    name: "PauseAfter",
+    wrapToolCall: async (request, handler) => {
+      const result = await handler(request);
+      interrupt({ kind: "audit" });
+      return result;
+    },
+  });
+  const make = (replies: AIMessage[]) =>
+    createAgent({
+      model: new ScriptedChatModel(replies),
+      tools: [sendTool(ran)],
+      checkpointer: saver,
+      middleware: [
+        pauseAfter,
+        naceAutoModeMiddleware({
+          classifierOptions: offline(server.fetch),
+          onError: "block",
+          screenshots: screens.source,
+        }),
+      ],
+    });
+  const config = { configurable: { thread_id: "capture-block" } };
+  const paused: any = await make([sendCall(), new AIMessage("done")]).invoke(
+    { messages: [new HumanMessage("Send the report")] },
+    config,
+  );
+  expect(paused.__interrupt__[0].value).toEqual({ kind: "audit" });
+  expect(screens.seen.calls).toBe(1);
+  const result: any = await make([new AIMessage("done")]).invoke(
+    new Command({ resume: { type: "approve" } }),
+    config,
+  );
+  // The block is replayed from the checkpoint: nothing is captured and Drex isn't asked.
+  expect(screens.seen.calls).toBe(1);
+  expect(server.requests).toHaveLength(0);
+  expect(ran).toEqual([]);
+  expect(toolMessage(result)?.content).toContain("its risk could not be checked (Error)");
+});
+
+it.each(["block", "throw"] as const)(
+  "blocks a resumed call whose context can't be captured again (onError: %s)",
+  async (onError) => {
+    const screens = flakyScreens((call) => call > 1);
+    const { server, ran, paused, resume } = await pauseThenRebuild({
+      script: [ASK],
+      gate: { onError, screenshots: screens.source },
+      thread: `capture-resume-${onError}`,
+    });
+    expect((paused as any).__interrupt__).toHaveLength(1);
+    const result = await resume({ type: "approve" });
+    expect(ran).toEqual([]);
+    expect(toolMessage(result)?.content).toContain(
+      "the paused call's context could not be checked; request a new tool call",
+    );
+    expect(server.requests).toHaveLength(1);
+  },
+);
+
+it("captures screenshots once on a first run with a thread, inside the decision's task", async () => {
+  const screens = flakyScreens(() => false);
+  const { server, paused } = await pauseThenRebuild({
+    script: [ASK],
+    gate: { screenshots: screens.source },
+    thread: "capture-once",
+  });
+  expect((paused as any).__interrupt__).toHaveLength(1);
+  expect(server.requests).toHaveLength(1);
+  expect(screens.seen.calls).toBe(1);
+  expect(String(screens.seen.namespaces[0])).toContain("NaceGateDecision");
 });

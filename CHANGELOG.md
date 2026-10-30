@@ -2,11 +2,11 @@
 
 ## 0.1.1
 
-- Keep gate verdicts only for pending human-approval interruptions with unchanged decision context.
+- Save each tool-gate decision in the agent's checkpoint (a `NaceGateDecision` task) and replay it on resume, on any worker, without asking Drex again. A pending approval no longer survives a change in the call, its context or the policy, and a lower-risk recheck can no longer bypass a pending rejection, including for custom decisions. Calls paused by 0.1.0 must be resolved or requested again after upgrading.
+- Test the oldest supported `@langchain/core`, `@langchain/langgraph` and `langchain` releases with a single copy of each.
 - Exclude custom headers from inspection and serialization while preserving outgoing request headers.
 - Reject out-of-range probabilities, confidences and scores, and invalid score rubrics.
 - Preserve special answer IDs in typed response accessors.
-
 - Require explicit provider keys outside the production Nace HTTPS hosts; reject blank keys.
 - Pin the resolved destination in serialization and use provider-specific secret references.
 - Strip Vercel bypass headers for custom hosts and refuse HTTP redirects.

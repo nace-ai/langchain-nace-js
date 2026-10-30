@@ -64,7 +64,7 @@ flowchart LR
     A -- "no checkpointer" --> B
 ```
 
-Resuming after an interrupt re-runs the hook; within a thread the first verdict is reused, so the person answers the question they were asked and Drex isn't called twice.
+Resuming after an interrupt re-runs the hook. The decision is saved in the checkpoint as a LangGraph task, so the resume replays it on any worker: the person answers the question they were asked, and Drex isn't called twice. A changed context or policy blocks the call instead.
 
 ## Data model
 

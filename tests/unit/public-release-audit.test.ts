@@ -217,44 +217,45 @@ it("checks threaded calls when prior tool messages contain bigint artifacts", as
   expect(drex.requests).toHaveLength(1);
 });
 
-it.each([false, true])(
-  "rechecks a pending approval only when screenshots change: %s",
-  async (changed) => {
-    const drex = fakeDrex([answer(2, 1, 1), answer(4, 1, 0)]);
-    let ran = false;
-    let screenshot = readFileSync(new URL("../fixtures/red.png", import.meta.url));
-    const send = tool(
-      async () => {
-        ran = true;
-        return "sent";
-      },
-      {
-        name: "send_report",
-        description: "Send report",
-        schema: z.object({}),
-      },
-    );
-    const agent = createAgent({
-      model: new ScriptedChatModel([
-        new AIMessage({ content: "", tool_calls: [{ id: "send", name: "send_report", args: {} }] }),
-        new AIMessage("done"),
-      ]),
-      tools: [send],
-      checkpointer: new MemorySaver(),
-      middleware: [
-        naceAutoModeMiddleware({
-          classifierOptions: offline(drex.fetch),
-          screenshots: () => [screenshot],
-        }),
-      ],
-    });
-    const config = { configurable: { thread_id: `screen-${changed}` } };
-    const paused = await agent.invoke({ messages: [new HumanMessage("Send the report")] }, config);
-    expect((paused as any).__interrupt__).toHaveLength(1);
-    if (changed) screenshot = readFileSync(new URL("../fixtures/blue.png", import.meta.url));
-    await agent.invoke(new Command({ resume: { type: "approve" } }), config);
-    expect(ran).toBe(!changed);
-    expect(drex.requests).toHaveLength(changed ? 2 : 1);
-    if (changed) expect(drex.requests[0]!.body.images).not.toEqual(drex.requests[1]!.body.images);
-  },
-);
+it.each([
+  { changed: false, nextRisk: 4 },
+  { changed: true, nextRisk: 4 },
+  { changed: true, nextRisk: 2 },
+])("binds pending approval to its screenshot: %j", async ({ changed, nextRisk }) => {
+  const drex = fakeDrex([answer(2, 1, 1), answer(nextRisk, 1, 1)]);
+  let ran = false;
+  let screenshot = readFileSync(new URL("../fixtures/red.png", import.meta.url));
+  const send = tool(
+    async () => {
+      ran = true;
+      return "sent";
+    },
+    {
+      name: "send_report",
+      description: "Send report",
+      schema: z.object({}),
+    },
+  );
+  const agent = createAgent({
+    model: new ScriptedChatModel([
+      new AIMessage({ content: "", tool_calls: [{ id: "send", name: "send_report", args: {} }] }),
+      new AIMessage("done"),
+    ]),
+    tools: [send],
+    checkpointer: new MemorySaver(),
+    middleware: [
+      naceAutoModeMiddleware({
+        classifierOptions: offline(drex.fetch),
+        screenshots: () => [screenshot],
+      }),
+    ],
+  });
+  const config = { configurable: { thread_id: `screen-${changed}` } };
+  const paused = await agent.invoke({ messages: [new HumanMessage("Send the report")] }, config);
+  expect((paused as any).__interrupt__).toHaveLength(1);
+  if (changed) screenshot = readFileSync(new URL("../fixtures/blue.png", import.meta.url));
+  await agent.invoke(new Command({ resume: { type: "approve" } }), config);
+  expect(ran).toBe(!changed);
+  expect(drex.requests).toHaveLength(changed ? 2 : 1);
+  if (changed) expect(drex.requests[0]!.body.images).not.toEqual(drex.requests[1]!.body.images);
+});

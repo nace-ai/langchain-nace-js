@@ -212,7 +212,7 @@ It answers three questions: a risk score, "destructive?" and "did the user ask f
   - Asking needs a checkpointer. Without one the call is blocked, and the message says so. Use `askHuman: false` to always block instead.
 - **If Drex can't answer, the call is blocked** (`onError: "block"`). A screenshot Drex can't read is dropped, and the check runs again without it.
 - **Everything is replaceable:** pass `questions`, `thresholdPolicy({ ... })`, or your own `(verdict) => GateDecision`.
-- **Resuming:** a pending human-approval interrupt keeps its verdict in memory while the tool and decision context stay the same. Completed calls and changed context are checked again. A resume in another process asks Drex again.
+- **Resuming:** a pending human-approval interrupt keeps its verdict in memory while the tool and decision context stay the same. Completed calls and changed context are checked again. If context changes during a pending approval, the call is blocked and must be requested again; the old approval cannot authorize the changed context. A resume in another process asks Drex again.
 
 ### `naceModelRouterMiddleware`: the model picker
 

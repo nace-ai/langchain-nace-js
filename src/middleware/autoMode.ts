@@ -333,9 +333,11 @@ export interface NaceAutoModeMiddlewareConfig {
   blockedMessage?: string;
 }
 
-/** Remembers verdicts by tool call id, so resuming after a person answers doesn't ask Drex again. */
+type PendingVerdict = { decision: GateDecision; verdict?: GateVerdict; inputKey: string };
+
+/** Remembers a pending approval and the exact decision input it covered. */
 class VerdictCache {
-  private readonly entries = new Map<string, { decision: GateDecision; verdict?: GateVerdict }>();
+  private readonly entries = new Map<string, PendingVerdict>();
 
   constructor(private readonly size = 256) {}
 
@@ -347,7 +349,7 @@ class VerdictCache {
     if (id) this.entries.delete(id);
   }
 
-  set(id: string | undefined, value: { decision: GateDecision; verdict?: GateVerdict }): void {
+  set(id: string | undefined, value: PendingVerdict): void {
     if (!id) return;
     this.entries.delete(id);
     this.entries.set(id, value);
@@ -524,6 +526,7 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
       // tool and decision context. Completed calls and new user turns are checked again.
       const threadId = runtime?.configurable?.thread_id;
       let key: string | undefined;
+      let inputKey: string | undefined;
       let selected: { decision: GateDecision; verdict?: GateVerdict };
       try {
         runtime?.signal?.throwIfAborted();
@@ -539,8 +542,9 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
               }),
             );
             key = createHash("sha256")
-              .update(JSON.stringify([String(threadId), call.id, prepared]))
+              .update(JSON.stringify([String(threadId), call.id]))
               .digest("hex");
+            inputKey = createHash("sha256").update(JSON.stringify(prepared)).digest("hex");
             attempts = prepared.map((input) => ({
               state: input.state as State,
               images: input.images.map((image) =>
@@ -552,7 +556,21 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
             // caching and let decide apply that retry and the configured error policy.
           }
         }
-        selected = cache.get(key) ?? (await decide(attempts, runtime?.signal));
+        const pending = cache.get(key);
+        selected =
+          pending && pending.inputKey === inputKey
+            ? pending
+            : await decide(attempts, runtime?.signal);
+        if (pending && pending.inputKey !== inputKey) {
+          // LangGraph's resume value answers the old interrupt. It must not
+          // approve a different context, even if the new policy also asks a person.
+          selected = {
+            decision: new Block(
+              "the decision context changed while approval was pending; request a new tool call",
+            ),
+            verdict: selected.verdict,
+          };
+        }
       } catch (error) {
         selected = failed(error, runtime?.signal);
       }
@@ -595,7 +613,8 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
         cache.delete(key);
         return result as Awaited<ReturnType<typeof handler>>;
       } catch (error) {
-        if (isGraphInterrupt(error)) cache.set(key, { decision, verdict });
+        if (isGraphInterrupt(error) && inputKey !== undefined)
+          cache.set(key, { decision, verdict, inputKey });
         else cache.delete(key);
         throw error;
       }

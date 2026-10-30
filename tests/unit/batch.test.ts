@@ -487,3 +487,147 @@ it.each([
     expect(starts).toHaveLength(0);
   },
 );
+
+// An override that answers an input with a batch of its own: the inner batch runs
+// inside the outer input's run, so it shares the outer batch's fate.
+it.each([false, true])(
+  "sends nothing from a nested batch an override starts after the outer batch's 401 (returnExceptions: %s)",
+  async (returnExceptions) => {
+    const gate = deferred();
+    const aFailed = deferred();
+    class Nesting extends NaceClassifier {
+      override async invoke(input: any, options?: any) {
+        if (input !== "b") return super.invoke(input, options);
+        await gate.promise;
+        const [reply] = await this.batch(["inner-b"]);
+        return reply!;
+      }
+    }
+    const handler = { awaitHandlers: true, handleChainError: () => aFailed.resolve() };
+    const { server, classifier: c } = classifierOf(Nesting, [status(401)]);
+    const outcome = settled(
+      c.batch(["a", "b"], { maxConcurrency: 2, callbacks: [handler] }, {
+        returnExceptions,
+      } as any) as Promise<any[]>,
+    );
+    await aFailed.promise;
+    await sleep(20);
+    gate.resolve();
+    const result: any = await outcome;
+    await settle();
+    expect(server.requests.map((r) => r.body.state)).toEqual(["a"]);
+    if (returnExceptions) expect(result.value[1]).toBeInstanceOf(Error);
+    else expect(String(result.error)).toContain("401");
+  },
+);
+
+it("stops the outer batch when a batch an override started inside it gets a 401", async () => {
+  class Delegating extends NaceClassifier {
+    override async invoke(input: any, options?: any) {
+      if (input !== "a") return super.invoke(input, options);
+      const [reply] = await this.batch(["inner-a"]);
+      return reply!;
+    }
+  }
+  const { server, classifier: c } = classifierOf(Delegating, [status(401)]);
+  const out = (await c.batch(
+    ["a", "b", "c"],
+    { maxConcurrency: 1 },
+    { returnExceptions: true },
+  )) as Error[];
+  await settle();
+  expect(server.requests.map((r) => r.body.state)).toEqual(["inner-a"]);
+  expect(String(out[0])).toContain("401");
+  expect(out[1]).toBeInstanceOf(NaceBatchStoppedError);
+  expect(out[2]).toBeInstanceOf(NaceBatchStoppedError);
+});
+
+it("keeps a nested batch's own non-terminal rejection to the nested batch", async () => {
+  const seed = await classifier([]).classifier.invoke("seed");
+  class Delegating extends NaceClassifier {
+    override async invoke(input: any, options?: any) {
+      if (input !== "a") return super.invoke(input, options);
+      try {
+        const [reply] = await this.batch(["inner-a"]);
+        return reply!;
+      } catch (error) {
+        if ((error as { status?: number }).status === 422) return seed;
+        throw error;
+      }
+    }
+  }
+  const { server, classifier: c } = classifierOf(Delegating, [status(422)]);
+  const out = await c.batch(["a", "b", "c"], { maxConcurrency: 1 });
+  expect(out).toHaveLength(3);
+  expect(out[0]).toBe(seed);
+  expect(server.requests.map((r) => r.body.state)).toEqual(["inner-a", "b", "c"]);
+});
+
+it("keeps independently started batches apart", async () => {
+  const { server, classifier: c } = classifier([status(401)]);
+  const first = await settled(c.batch(["a"]));
+  expect(String((first as any).error)).toContain("401");
+  // A new batch on the same classifier starts with a clean state.
+  const second = await c.batch(["b", "c"], { maxConcurrency: 1 });
+  expect(second).toHaveLength(2);
+  expect(server.requests.map((r) => r.body.state)).toEqual(["a", "b", "c"]);
+});
+
+// A 401, 402 or 403 means the classifier's key or account can't be used, so it stops
+// every batch running on that classifier, requests made from callbacks included.
+it("stops a request a concurrent batch's callback makes after another batch's 401", async () => {
+  const gate = deferred();
+  const auxDone = deferred();
+  let aux: any;
+  const holding = {
+    handleChainStart: async () => {
+      await gate.promise;
+    },
+  };
+  const calling = {
+    handleChainEnd: async () => {
+      aux = await settled(c.invoke("aux-b"));
+      auxDone.resolve();
+    },
+  };
+  const { server, classifier: c } = classifier([status(401)]);
+  // The background start callback holds LangChain's shared callback queue.
+  const first: any = await settled(c.batch(["a"], { callbacks: [holding] }));
+  expect(String(first.error)).toContain("401");
+  // A concurrent batch on the same classifier completes; its own inputs are sent.
+  const second = await c.batch(["b"], { callbacks: [calling] });
+  expect(second).toHaveLength(1);
+  expect(aux).toBeUndefined();
+  gate.resolve();
+  await auxDone.promise;
+  expect(aux.error).toBeInstanceOf(NaceBatchStoppedError);
+  expect(aux.error.cause).toBe(first.error);
+  expect(server.requests.map((r) => r.body.state)).toEqual(["a", "b"]);
+});
+
+it.each([false, true])(
+  "stops the batch after an override recovers from a 401 (returnExceptions: %s)",
+  async (returnExceptions) => {
+    const seed = await classifier([]).classifier.invoke("seed");
+    class Recovering extends NaceClassifier {
+      override async invoke(input: any, options?: any) {
+        try {
+          return await super.invoke(input, options);
+        } catch (error) {
+          if ((error as { status?: number }).status === 401) return seed;
+          throw error;
+        }
+      }
+    }
+    const { server, classifier: c } = classifierOf(Recovering, [status(401)]);
+    const result: any = await settled(
+      c.batch(["a", "b"], { maxConcurrency: 1 }, { returnExceptions } as any) as Promise<any[]>,
+    );
+    await settle();
+    expect(server.requests.map((r) => r.body.state)).toEqual(["a"]);
+    if (returnExceptions) {
+      expect(result.value[0]).toBe(seed);
+      expect(result.value[1]).toBeInstanceOf(NaceBatchStoppedError);
+    } else expect(String(result.error)).toContain("401");
+  },
+);

@@ -249,8 +249,8 @@ export class NaceClassifier extends Runnable<
 
     const headers: Record<string, string> = { ...defaultHeaders };
     if (this.openrouter) {
-      headers["HTTP-Referer"] ??= "https://nace.ai";
-      headers["X-OpenRouter-Title"] ??= "Drex for LangChain";
+      headers["http-referer"] ??= "https://nace.ai";
+      headers["x-openrouter-title"] ??= "Drex for LangChain";
     }
     // Looked up at call time, so a later `vi.spyOn(globalThis, "fetch")` or a
     // polyfill installed after construction is still used.

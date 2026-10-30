@@ -129,3 +129,22 @@ it("does not follow redirects carrying private request headers", async () => {
     );
   }
 });
+
+it.each([
+  ["HTTP-Referer", "X-OpenRouter-Title"],
+  ["http-referer", "x-openrouter-title"],
+  ["HTTP-REFERER", "X-OPENROUTER-TITLE"],
+])("preserves caller attribution headers %s and %s", async (referer, title) => {
+  const server = fakeDrex();
+  const classifier = new NaceClassifier({
+    baseUrl: "https://openrouter.ai/api/v1",
+    apiKey: "provider-key",
+    questions,
+    fetch: server.fetch,
+    defaultHeaders: { [referer]: "https://app.example", [title]: "Customer app" },
+  });
+  await classifier.invoke("x");
+  const headers = server.requests[0]!.headers;
+  expect(headers.get("http-referer")).toBe("https://app.example");
+  expect(headers.get("x-openrouter-title")).toBe("Customer app");
+});

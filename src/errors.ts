@@ -61,6 +61,15 @@ export class NaceMediaError extends ns.brand(NaceError, "media") {
   override readonly name: string = "NaceMediaError";
 }
 
+/**
+ * A `batch` input that was never sent, because an earlier request in the batch
+ * failed in a way every later request would too (401, 402, 403) or the batch was
+ * cancelled. `cause` is that failure.
+ */
+export class NaceBatchStoppedError extends ns.brand(NaceError, "batch-stopped") {
+  override readonly name: string = "NaceBatchStoppedError";
+}
+
 /** Drex answered with an unsuccessful HTTP status. */
 export class NaceAPIError extends ns.brand(NaceError, "api") {
   override readonly name: string = "NaceAPIError";

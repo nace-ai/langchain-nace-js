@@ -14,6 +14,7 @@ export {
   NaceAPITimeoutError,
   NaceAuthenticationError,
   NaceBadRequestError,
+  NaceBatchStoppedError,
   NaceError,
   NaceImageError,
   NaceImageModelError,

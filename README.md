@@ -284,8 +284,10 @@ Every error extends LangChain's `LangChainError`. Check errors with `.isInstance
 | `NaceOverloadedError`                                     | 529, after retries                                   |
 | `NaceAPIConnectionError`, `NaceAPITimeoutError`           | network problems                                     |
 | `NaceImageModelError`, `NaceImageError`, `NaceMediaError` | images or media that can't be sent; nothing was sent |
+| `NaceBatchStoppedError`                                   | a `batch` input that was never sent                  |
 - **Retries:** 408, 429, 5xx and 529 responses are retried (`maxRetries: 2`), waiting as long as `retry-after-ms` asks. Each attempt may take up to 60 s.
 - **Cancelling:** a call's `signal` or `timeout`, or a cancelled agent run, also aborts the HTTP request.
+- **Batches:** no new request starts after a failure that rejects the batch (requests already in flight finish, but their results are discarded), or, with `returnExceptions: true`, after a 401, 402 or 403 or a cancelled `signal`: every later request would fail the same way. Those inputs get a `NaceBatchStoppedError` whose `cause` is the first failure, and every other failure, such as a 422, stays with its own input. `maxConcurrency` can come from the call options or from `batchOptions`.
 
 ## Tracing
 

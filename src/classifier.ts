@@ -1,8 +1,19 @@
-import { Runnable, type RunnableConfig } from "@langchain/core/runnables";
+import {
+  Runnable,
+  type RunnableBatchOptions,
+  type RunnableConfig,
+} from "@langchain/core/runnables";
 import { getEnvironmentVariable } from "@langchain/core/utils/env";
 import { type ImageInput, NaceClient, NaceError as SdkNaceError } from "nace-sdk";
 
-import { convertError, NaceError, NaceImageError, NaceImageModelError } from "./errors.js";
+import {
+  convertError,
+  NaceAPIError,
+  NaceBatchStoppedError,
+  NaceError,
+  NaceImageError,
+  NaceImageModelError,
+} from "./errors.js";
 import { asDataUrl, type ImageLike, toDrexImage } from "./images.js";
 import { encodeState, type State } from "./state.js";
 import {
@@ -335,30 +346,72 @@ export class NaceClassifier extends Runnable<
     } as Partial<NaceClassifierCallOptions> & { runType: string });
   }
 
-  /** Answer many requests; at most `maxConcurrency` (default 8) at a time. */
+  /**
+   * Answer many requests; at most `maxConcurrency` (default 8) at a time, in
+   * input order. No new request starts after a failure that rejects the batch,
+   * or, with `returnExceptions: true`, after a 401, 402 or 403 or cancellation:
+   * those inputs get a `NaceBatchStoppedError`.
+   */
   override async batch(
     inputs: State[],
     options?: Partial<NaceClassifierCallOptions> | Partial<NaceClassifierCallOptions>[],
-    batchOptions?: { returnExceptions?: false },
+    batchOptions?: RunnableBatchOptions & { returnExceptions?: false },
   ): Promise<ClassificationResponse[]>;
 
   override async batch(
     inputs: State[],
     options?: Partial<NaceClassifierCallOptions> | Partial<NaceClassifierCallOptions>[],
-    batchOptions?: { returnExceptions: true },
+    batchOptions?: RunnableBatchOptions & { returnExceptions: true },
   ): Promise<(ClassificationResponse | Error)[]>;
 
   override async batch(
     inputs: State[],
     options?: Partial<NaceClassifierCallOptions> | Partial<NaceClassifierCallOptions>[],
-    batchOptions?: { returnExceptions?: boolean },
+    batchOptions?: RunnableBatchOptions,
   ): Promise<(ClassificationResponse | Error)[]> {
-    const withLimit = (config?: Partial<NaceClassifierCallOptions>) => ({
-      ...config,
-      maxConcurrency: config?.maxConcurrency ?? this.maxConcurrency,
-    });
-    const configs = Array.isArray(options) ? options.map(withLimit) : withLimit(options);
-    return super.batch(inputs, configs, batchOptions as { returnExceptions: true });
+    const configs = this._getOptionsList(options ?? {}, inputs.length);
+    const limit = Math.max(
+      1,
+      configs[0]?.maxConcurrency ?? batchOptions?.maxConcurrency ?? this.maxConcurrency,
+    );
+    const returnExceptions = batchOptions?.returnExceptions === true;
+    const results: (ClassificationResponse | Error)[] = new Array(inputs.length);
+    let next = 0;
+    let stopped: { error: unknown } | undefined;
+    const notSent = (index: number): Promise<unknown> =>
+      // A run with the same start and error events as a failed request, but no request.
+      this._callWithConfig(
+        () => {
+          throw new NaceBatchStoppedError(
+            "Not sent: an earlier request in this batch failed, and this one would too.",
+            { cause: stopped?.error },
+          );
+        },
+        inputs[index] as State,
+        { ...configs[index], runType: "llm" } as Partial<NaceClassifierCallOptions>,
+      );
+    const worker = async (): Promise<void> => {
+      while (next < inputs.length) {
+        const index = next++;
+        if (stopped !== undefined) {
+          results[index] = (await notSent(index).catch((error: unknown) => error)) as Error;
+          continue;
+        }
+        try {
+          results[index] = await this.invoke(inputs[index] as State, configs[index]);
+        } catch (error) {
+          // Recorded before any await, so no other worker starts another request.
+          if (!returnExceptions) {
+            stopped ??= { error };
+            throw error;
+          }
+          results[index] = error as Error;
+          if (stopsBatch(error, configs[index]?.signal)) stopped ??= { error };
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, inputs.length) }, worker));
+    return results;
   }
 
   /** The request body fields for one call, before the SDK adds `model` defaults. */
@@ -430,6 +483,14 @@ export class NaceClassifier extends Runnable<
       throw convertError(error, this.provider);
     }
   }
+}
+
+/** Failures every later request in a batch would repeat: the key, account or cancellation. */
+const BATCH_STOP_STATUSES = new Set([401, 402, 403]);
+
+function stopsBatch(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  return NaceAPIError.isInstance(error) && BATCH_STOP_STATUSES.has(error.status);
 }
 
 /** OpenRouter takes images as `image_url` parts of a `state` content array. */

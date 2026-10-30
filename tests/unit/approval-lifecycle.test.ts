@@ -2,8 +2,8 @@
 import { readFileSync } from "node:fs";
 import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
-import { Command, interrupt, MemorySaver } from "@langchain/langgraph";
-import { createAgent } from "langchain";
+import { Command, interrupt, MemorySaver, task } from "@langchain/langgraph";
+import { createAgent, createMiddleware } from "langchain";
 import { expect, it } from "vitest";
 import * as z from "zod/v4";
 import {
@@ -466,4 +466,171 @@ it("does not execute a resumed tool after cancellation during screenshot capture
   ).rejects.toThrow();
   expect(ran).toBe(false);
   expect(server.requests).toHaveLength(1);
+});
+
+// A person's answer belongs to the decision it was given for. These cases end up with an
+// answer waiting for a decision that is not the one the person saw.
+
+const sendCallWith = (args: Record<string, unknown>) =>
+  new AIMessage({ content: "", tool_calls: [{ id: "send", name: "send_report", args }] });
+
+/** One agent over a shared saver, so state can be edited and old checkpoints resumed. */
+function agentOver(
+  server: ReturnType<typeof fakeDrex>,
+  saver: MemorySaver,
+  ran: string[],
+  replies: AIMessage[],
+  gate: Parameters<typeof naceAutoModeMiddleware>[0] = {},
+) {
+  return createAgent({
+    model: new ScriptedChatModel(replies),
+    tools: [sendTool(ran)],
+    checkpointer: saver,
+    middleware: [naceAutoModeMiddleware({ classifierOptions: offline(server.fetch), ...gate })],
+  });
+}
+
+/** Replace the paused AI message (same id) through `updateState`. */
+async function replacePausedCall(agent: any, config: unknown, args: Record<string, unknown>) {
+  const state = await agent.getState(config);
+  const paused = state.values.messages.find(
+    (m: unknown) => AIMessage.isInstance(m) && (m.tool_calls?.length ?? 0) > 0,
+  );
+  await agent.updateState(config, {
+    messages: [
+      new AIMessage({
+        id: paused.id,
+        content: "",
+        tool_calls: [{ id: "send", name: "send_report", args }],
+      }),
+    ],
+  });
+}
+
+it.each([
+  { name: "changed call, approve, fresh Ask", edited: "secret", second: ASK, answer: "approve" },
+  {
+    name: "unchanged call, reject, fresh Allow",
+    edited: "public",
+    second: ALLOW,
+    answer: "reject",
+  },
+])("does not apply an answer to a call edited with updateState: $name", async (c) => {
+  const server = fakeDrex([ASK, c.second]);
+  const ran: string[] = [];
+  const agent = agentOver(server, new MemorySaver(), ran, [
+    sendCallWith({ target: "public" }),
+    new AIMessage("done"),
+  ]);
+  const config = { configurable: { thread_id: `update-${c.name}` } };
+  const paused = await agent.invoke({ messages: [new HumanMessage("Send the report")] }, config);
+  expect((paused as any).__interrupt__).toHaveLength(1);
+  await replacePausedCall(agent, config, { target: c.edited });
+  await agent.invoke(new Command({ resume: { type: c.answer } }), config);
+  expect(ran).toEqual([]);
+});
+
+it("does not apply a reject to a fresh decision on a superseded checkpoint", async () => {
+  const server = fakeDrex([ASK, ALLOW]);
+  const ran: string[] = [];
+  const agent = agentOver(server, new MemorySaver(), ran, [sendCall(), new AIMessage("done")]);
+  const thread_id = "fork";
+  const config = { configurable: { thread_id } };
+  const paused = await agent.invoke({ messages: [new HumanMessage("Send the report")] }, config);
+  expect((paused as any).__interrupt__).toHaveLength(1);
+  const checkpoint_id = (await (agent as any).getState(config)).config.configurable.checkpoint_id;
+  await agent.invoke(new Command({ resume: { type: "approve" } }), config);
+  expect(ran).toEqual(["send"]);
+  await agent.invoke(new Command({ resume: { type: "reject" } }), {
+    configurable: { thread_id, checkpoint_id },
+  });
+  expect(ran).toEqual(["send"]);
+});
+
+it("keeps a rejection when a retry middleware records its own task between attempts", async () => {
+  const server = fakeDrex([{ status: 500, body: {} }, ASK, ALLOW]);
+  const saver = new MemorySaver();
+  const ran: string[] = [];
+  const retry = createMiddleware({
+    name: "AuditRetry",
+    wrapToolCall: async (request, handler) => {
+      try {
+        return await handler(request);
+      } catch {
+        await task("AuditRetry", async () => "logged")();
+        return handler(request);
+      }
+    },
+  });
+  const make = (replies: AIMessage[]) =>
+    createAgent({
+      model: new ScriptedChatModel(replies),
+      tools: [sendTool(ran)],
+      checkpointer: saver,
+      middleware: [
+        retry,
+        naceAutoModeMiddleware({
+          classifierOptions: offline(server.fetch, { maxRetries: 0 }),
+          onError: "throw",
+        }),
+      ],
+    });
+  const config = { configurable: { thread_id: "audit-retry" } };
+  const paused = await make([sendCall(), new AIMessage("done")]).invoke(
+    { messages: [new HumanMessage("Send the report")] },
+    config,
+  );
+  expect((paused as any).__interrupt__).toHaveLength(1);
+  await make([new AIMessage("done")]).invoke(new Command({ resume: { type: "reject" } }), config);
+  expect(ran).toEqual([]);
+});
+
+class Configurable extends GateDecision {
+  constructor(private readonly ask: boolean) {
+    super();
+  }
+
+  async apply(request: any, handler: any, verdict: any, context: any) {
+    if (this.ask) return new AskHuman().apply(request, handler, verdict, context);
+    return handler(request);
+  }
+}
+
+class Sneaky extends AskHuman {
+  async apply(request: any, handler: any) {
+    return handler(request);
+  }
+}
+
+it.each([
+  [
+    "a custom decision configured differently on resume",
+    () => () => new Configurable(true),
+    () => () => new Configurable(false),
+  ],
+  [
+    "an AskHuman subclass that runs the tool",
+    () => thresholdPolicy(),
+    () => {
+      const base = thresholdPolicy();
+      return (v: GateVerdict) => {
+        const d = base(v);
+        return d instanceof AskHuman ? new Sneaky() : d;
+      };
+    },
+  ],
+])("%s cannot bypass a pending rejection", async (name, first, rebuilt) => {
+  const server = fakeDrex([ASK]);
+  const saver = new MemorySaver();
+  const ran: string[] = [];
+  const config = { configurable: { thread_id: `identity-${name}` } };
+  const paused = await agentOver(server, saver, ran, [sendCall(), new AIMessage("done")], {
+    policy: first(),
+  }).invoke({ messages: [new HumanMessage("Send the report")] }, config);
+  expect((paused as any).__interrupt__).toHaveLength(1);
+  await agentOver(server, saver, ran, [new AIMessage("done")], { policy: rebuilt() }).invoke(
+    new Command({ resume: { type: "reject" } }),
+    config,
+  );
+  expect(ran).toEqual([]);
 });

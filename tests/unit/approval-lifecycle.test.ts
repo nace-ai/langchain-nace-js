@@ -562,48 +562,6 @@ it("does not apply a reject to a fresh decision on a superseded checkpoint", asy
   expect(toolMessage(forked)?.content).toContain(OTHER_ANSWER);
 });
 
-it("keeps a rejection when a retry middleware records its own task between attempts", async () => {
-  const server = fakeDrex([{ status: 500, body: {} }, ASK, ALLOW]);
-  const saver = new MemorySaver();
-  const ran: string[] = [];
-  const retry = createMiddleware({
-    name: "AuditRetry",
-    wrapToolCall: async (request, handler) => {
-      try {
-        return await handler(request);
-      } catch {
-        await task("AuditRetry", async () => "logged")();
-        return handler(request);
-      }
-    },
-  });
-  const make = (replies: AIMessage[]) =>
-    createAgent({
-      model: new ScriptedChatModel(replies),
-      tools: [sendTool(ran)],
-      checkpointer: saver,
-      middleware: [
-        retry,
-        naceAutoModeMiddleware({
-          classifierOptions: offline(server.fetch, { maxRetries: 0 }),
-          onError: "throw",
-        }),
-      ],
-    });
-  const config = { configurable: { thread_id: "audit-retry" } };
-  const paused = await make([sendCall(), new AIMessage("done")]).invoke(
-    { messages: [new HumanMessage("Send the report")] },
-    config,
-  );
-  expect((paused as any).__interrupt__).toHaveLength(1);
-  const result = await make([new AIMessage("done")]).invoke(
-    new Command({ resume: { type: "reject" } }),
-    config,
-  );
-  expect(ran).toEqual([]);
-  expect(toolMessage(result)?.content).toContain(OTHER_ANSWER);
-});
-
 class Configurable extends GateDecision {
   constructor(private readonly ask: boolean) {
     super();

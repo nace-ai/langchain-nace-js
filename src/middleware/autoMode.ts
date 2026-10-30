@@ -512,12 +512,15 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
     return latestImages(request.state.messages ?? [], 2) as ImageLike[];
   }
 
-  function failed(error: unknown, signal?: AbortSignal): { decision: GateDecision } {
+  /** Why a call is blocked when its check failed. */
+  const unchecked = (name: string) => new Block(`its risk could not be checked (${name})`);
+
+  function failed(error: unknown, signal?: AbortSignal): { decision: GateDecision; name: string } {
     // A cancelled run stays cancelled; it isn't a Drex failure to block on.
     if (onError === "throw" || signal?.aborted) throw error;
     const name = isRecord(error) && typeof error.name === "string" ? error.name : "Error";
     console.warn(`[langchain-nace] Drex could not check a tool call; blocking it (${name}).`);
-    return { decision: new Block(`its risk could not be checked (${name})`) };
+    return { decision: unchecked(name), name };
   }
 
   type DecisionAttempt = { state: State; images: ImageLike[] };
@@ -583,6 +586,8 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
   /** Re-derive a paused call's decision from its checkpointed record. */
   function replay(record: unknown, callId: string | null, inputKey: string | null): Selected {
     if (!isGateRecord(record)) return stop("the paused decision could not be read");
+    // A check that failed (with `onError: "block"`) is the same block it was the first time.
+    if (record.error !== null) return { decision: unchecked(record.error) };
     if (record.response === null) return stop("the paused decision could not be read");
     let selected: Selected;
     try {
@@ -659,7 +664,7 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
         }
         const callId = call.id ?? null;
         // Set by `decideNow` when it runs in this invocation (not on a replay).
-        const now: { selected?: Selected; failure?: { error: unknown } } = {};
+        const now: { selected?: Selected } = {};
         const decideNow = async (): Promise<GateRecord> => {
           const base = { v: GATE_RECORD_VERSION, callId, inputKey } as const;
           try {
@@ -674,10 +679,11 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
               error: null,
             };
           } catch (error) {
-            // Never throw from the task: a task error fails the whole graph run and
-            // bypasses `onError`. The failure is applied below, as without a checkpoint.
-            now.failure = { error };
-            const name = isRecord(error) && typeof error.name === "string" ? error.name : "Error";
+            // An error that ends the run (`onError: "throw"`, or a cancellation) is thrown, so
+            // the task fails and the run fails with it; running again asks Drex again. Nothing
+            // records it, so nothing shifts the task indices other middleware relies on. Only a
+            // failure that blocks the call is recorded, and replayed as that same block.
+            const { name } = failed(error, signal);
             return { ...base, response: null, requestId: null, decision: "block", error: name };
           }
         };
@@ -692,18 +698,7 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
             return undefined; // Throws synchronously outside a LangGraph run.
           }
         };
-        let stored: unknown;
-        for (;;) {
-          now.selected = undefined;
-          now.failure = undefined;
-          stored = await (recorded() ?? decideNow());
-          if (now.selected !== undefined || now.failure !== undefined) break; // decided now
-          // A replayed failed check never asked anyone, so check again; the new
-          // result is recorded by the next task call, which replays deterministically.
-          if (!(isGateRecord(stored) && stored.error !== null)) break;
-        }
-        const failure = now.failure as { error: unknown } | undefined;
-        if (failure !== undefined) throw failure.error;
+        const stored: unknown = await (recorded() ?? decideNow());
         const decidedNow = now.selected as Selected | undefined;
         if (decidedNow !== undefined) {
           fresh = true;

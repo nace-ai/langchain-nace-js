@@ -103,3 +103,146 @@ it("emits one run per input, including inputs that were not sent", async () => {
   expect(events.filter((e) => e === "start")).toHaveLength(5);
   expect(events.filter((e) => e === "error")).toHaveLength(5);
 });
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+const settled = <T>(promise: Promise<T>) =>
+  promise.then(
+    (value) => ({ value }),
+    (error: unknown) => ({ error }),
+  );
+
+it.each([false, true])(
+  "sends nothing for an input whose start callback outlives a 401 (returnExceptions: %s)",
+  async (returnExceptions) => {
+    const gate = deferred();
+    const bWaiting = deferred();
+    const aFailed = deferred();
+    const handler = {
+      awaitHandlers: true,
+      handleChainStart: async (_chain: unknown, run: { input?: unknown }) => {
+        if (run.input !== "b") return;
+        bWaiting.resolve();
+        await gate.promise;
+      },
+      handleChainError: () => aFailed.resolve(),
+    };
+    const { server, classifier: c } = classifier([status(401)]);
+    const outcome = settled(
+      c.batch(["a", "b"], { maxConcurrency: 2, callbacks: [handler] }, {
+        returnExceptions,
+      } as any) as Promise<any[]>,
+    );
+    await bWaiting.promise;
+    await aFailed.promise;
+    await sleep(20);
+    gate.resolve();
+    const result: any = await outcome;
+    await settle();
+    expect(server.requests.map((r) => r.body.state)).toEqual(["a"]);
+    if (returnExceptions) {
+      expect(result.value[0]).toBeInstanceOf(Error);
+      expect(result.value[1]).toBeInstanceOf(NaceBatchStoppedError);
+    } else expect(String(result.error)).toContain("401");
+  },
+);
+
+it.each([false, true])(
+  "sends nothing while the failed request's error callback runs (returnExceptions: %s)",
+  async (returnExceptions) => {
+    const many = Array.from({ length: 12 }, (_, i) => `ticket ${i}`);
+    const { server, classifier: c } = classifier([
+      status(401),
+      (body: any) => ({ body: okBody(body), delayMs: 30 }),
+    ]);
+    let first = true;
+    let sentDuringCallback = -1;
+    const handler = {
+      awaitHandlers: true,
+      handleChainError: async () => {
+        if (!first) return;
+        first = false;
+        await sleep(50);
+        sentDuringCallback = server.requests.length;
+      },
+    };
+    const outcome = settled(
+      c.batch(many, { maxConcurrency: 2, callbacks: [handler] }, { returnExceptions } as any),
+    );
+    const result: any = await outcome;
+    expect(sentDuringCallback).toBe(2);
+    await settle();
+    expect(server.requests).toHaveLength(2);
+    if (returnExceptions) {
+      expect(result.value.filter((r: unknown) => r instanceof NaceBatchStoppedError)).toHaveLength(
+        10,
+      );
+    } else expect(String(result.error)).toContain("401");
+  },
+);
+
+it("keeps cancellation to the input whose signal was aborted", async () => {
+  const aborted = AbortSignal.abort();
+  // One cancelled input fails alone.
+  const one = classifier([]);
+  const out = await one.classifier.batch(["a", "b"], [{ maxConcurrency: 1, signal: aborted }, {}], {
+    returnExceptions: true,
+  });
+  expect(out[0]).toBeInstanceOf(Error);
+  expect((out[0] as Error).name).toBe("AbortError");
+  expect(out[1]).not.toBeInstanceOf(Error);
+  expect((out[1] as any).nouls.q).toBeDefined();
+  expect(one.server.requests.map((r) => r.body.state)).toEqual(["b"]);
+  // A batch-wide cancel sends nothing; every input gets an abort error or a stopped error.
+  const whole = classifier([]);
+  const all = await whole.classifier.batch(
+    ["a", "b", "c"],
+    { signal: aborted },
+    { returnExceptions: true },
+  );
+  expect(all.every((r) => r instanceof Error)).toBe(true);
+  expect(whole.server.requests).toHaveLength(0);
+});
+
+it("gives inputs that were never sent a run when the batch rejects", async () => {
+  const gate = deferred();
+  const starts: unknown[] = [];
+  let errors = 0;
+  const handler = {
+    awaitHandlers: true,
+    handleChainStart: async (_chain: unknown, run: { input?: unknown }) => {
+      starts.push(run.input);
+      if (run.input === "c" || run.input === "d") await gate.promise;
+    },
+    handleChainError: () => {
+      errors += 1;
+    },
+  };
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const { server, classifier: c } = classifier([status(401), status(401)]);
+    const outcome = settled(
+      c.batch(["a", "b", "c", "d"], { maxConcurrency: 2, callbacks: [handler] }),
+    );
+    // The rejection does not wait for the runs of inputs that were not sent.
+    const first: any = await Promise.race([outcome, sleep(1000).then(() => ({ late: true }))]);
+    expect(first.late).toBeUndefined();
+    expect(String(first.error)).toContain("401");
+    gate.resolve();
+    await settle();
+    expect(starts).toHaveLength(4);
+    expect(errors).toBe(4);
+    expect(unhandled).toEqual([]);
+    expect(server.requests).toHaveLength(2);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});

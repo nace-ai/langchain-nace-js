@@ -287,7 +287,7 @@ Every error extends LangChain's `LangChainError`. Check errors with `.isInstance
 | `NaceBatchStoppedError`                                   | a `batch` input that was never sent                  |
 - **Retries:** 408, 429, 5xx and 529 responses are retried (`maxRetries: 2`), waiting as long as `retry-after-ms` asks. Each attempt may take up to 60 s.
 - **Cancelling:** a call's `signal` or `timeout`, or a cancelled agent run, also aborts the HTTP request.
-- **Batches:** after a failure that rejects the batch, or after a 401, 402 or 403 with `returnExceptions: true`, no new input is sent: every later request would fail the same way. Requests already sent finish, including the SDK's own retries of them, and their results are discarded when the batch rejects. A cancelled input fails alone. Inputs that were not sent get a `NaceBatchStoppedError` whose `cause` is the first failure, and a run in your callbacks; every other failure, such as a 422, stays with its own input. `maxConcurrency` can come from the call options or from `batchOptions`.
+- **Batches:** after a failure that rejects the batch, or after a 401, 402 or 403 with `returnExceptions: true`, no new input is sent: every later request would fail the same way. Requests already sent finish, including the SDK's own retries of them, and their results are discarded when the batch rejects. A cancelled input fails alone. Inputs that were not sent get a `NaceBatchStoppedError` whose `cause` is the first failure, and a run in your callbacks; every other failure, such as a 422, stays with its own input. `maxConcurrency` can come from the call options or from `batchOptions`. Each input goes through `invoke`, so a subclass that overrides `invoke` applies to batches too.
 
 ## Tracing
 

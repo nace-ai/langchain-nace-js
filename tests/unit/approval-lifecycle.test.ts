@@ -2,10 +2,11 @@
 import { readFileSync } from "node:fs";
 import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
-import { Command, interrupt, MemorySaver, task } from "@langchain/langgraph";
+import { Command, interrupt, isGraphBubbleUp, MemorySaver, task } from "@langchain/langgraph";
 import { createAgent, createMiddleware } from "langchain";
 import { expect, it, vi } from "vitest";
 import * as z from "zod/v4";
+import { NaceAPIError } from "../../src/errors.js";
 import {
   AskHuman,
   GateDecision,
@@ -233,9 +234,12 @@ it("checks again after a failed check with onError: 'throw', then replays on a r
     });
   const config = { configurable: { thread_id: "retry" } };
   const agent = make([sendCall(), new AIMessage("done")]);
-  await expect(
-    agent.invoke({ messages: [new HumanMessage("Send the report")] }, config),
-  ).rejects.toThrow(/Drex returned 500/);
+  // The failed check fails the run, and callers see Drex's own error.
+  const failure = await agent
+    .invoke({ messages: [new HumanMessage("Send the report")] }, config)
+    .catch((error: unknown) => error);
+  expect(NaceAPIError.isInstance(failure)).toBe(true);
+  expect(failure).toMatchObject({ message: expect.stringMatching(/Drex returned 500/) });
   const paused = await agent.invoke(null as any, config);
   expect((paused as any).__interrupt__).toHaveLength(1);
   await make([new AIMessage("done")]).invoke(new Command({ resume: { type: "reject" } }), config);
@@ -705,4 +709,183 @@ it.each([
   expect(ran).toEqual(c.ran);
   expect(server.requests).toHaveLength(1);
   if (c.text) expect(toolMessage(result)?.content).toContain(c.text);
+});
+
+// A failed check ends the run (with `onError: "throw"`). Retrying the run asks Drex again;
+// nothing records the failure, so nothing shifts the task indices other middleware relies on.
+
+/**
+ * An outer retry middleware that records its own task between two attempts. It lets graph
+ * control flow (an interrupt) pass, as any retry middleware must.
+ */
+const auditRetry = createMiddleware({
+  name: "AuditRetry",
+  wrapToolCall: async (request, handler) => {
+    try {
+      return await handler(request);
+    } catch (error) {
+      if (isGraphBubbleUp(error)) throw error;
+      await task("AuditRetry", async () => "logged")();
+      return handler(request);
+    }
+  },
+});
+
+/** A custom decision that asks inside a nested task, and runs the tool only on "approve". */
+class Review extends GateDecision {
+  readonly id = "review-v1";
+
+  async apply(request: any, handler: any, _verdict: unknown, context: any) {
+    const answer = (await task("ReviewTool", async () => interrupt({ kind: "review" }))()) as any;
+    if (answer?.type === "approve") return handler(request);
+    return context.blocked("rejected in review");
+  }
+}
+
+const retrying = (
+  server: ReturnType<typeof fakeDrex>,
+  saver: MemorySaver,
+  ran: string[],
+  replies: AIMessage[],
+  gate: Parameters<typeof naceAutoModeMiddleware>[0] = {},
+) =>
+  createAgent({
+    model: new ScriptedChatModel(replies),
+    tools: [sendTool(ran)],
+    checkpointer: saver,
+    middleware: [
+      auditRetry,
+      naceAutoModeMiddleware({
+        classifierOptions: offline(server.fetch, { maxRetries: 0 }),
+        onError: "throw",
+        ...gate,
+      }),
+    ],
+  });
+
+it("keeps an id-keyed rejection of a nested approval after a failed check and an outer retry", async () => {
+  const server = fakeDrex([{ status: 500, body: {} }, ALLOW]);
+  const saver = new MemorySaver();
+  const ran: string[] = [];
+  const config = { configurable: { thread_id: "nested-review" } };
+  const gate = { policy: () => new Review() };
+  const agent = retrying(server, saver, ran, [sendCall(), new AIMessage("done")], gate);
+  // The failed gate task fails the run, even though the outer middleware catches its error.
+  await expect(
+    agent.invoke({ messages: [new HumanMessage("Send the report")] }, config),
+  ).rejects.toThrow();
+  expect(ran).toEqual([]);
+  const paused = await agent.invoke(null as any, config);
+  expect((paused as any).__interrupt__).toHaveLength(1);
+  expect((paused as any).__interrupt__[0].value).toEqual({ kind: "review" });
+  const id = (paused as any).__interrupt__[0].id;
+  await retrying(server, saver, ran, [new AIMessage("done")], gate).invoke(
+    new Command({ resume: { [id]: { type: "reject" } } }),
+    config,
+  );
+  expect(ran).toEqual([]);
+  expect(server.requests).toHaveLength(2);
+});
+
+it.each([
+  { answer: "approve", runs: ["send"] },
+  { answer: "reject", runs: [] },
+])("honours a person's $answer after a failed check and an outer retry", async (c) => {
+  const server = fakeDrex([{ status: 500, body: {} }, ASK]);
+  const saver = new MemorySaver();
+  const ran: string[] = [];
+  const config = { configurable: { thread_id: `plain-ask-${c.answer}` } };
+  const agent = retrying(server, saver, ran, [sendCall(), new AIMessage("done")]);
+  await expect(
+    agent.invoke({ messages: [new HumanMessage("Send the report")] }, config),
+  ).rejects.toThrow();
+  expect(ran).toEqual([]);
+  const paused = await agent.invoke(null as any, config);
+  expect((paused as any).__interrupt__).toHaveLength(1);
+  const result = await retrying(server, saver, ran, [new AIMessage("done")]).invoke(
+    new Command({ resume: { type: c.answer } }),
+    config,
+  );
+  expect(ran).toEqual(c.runs);
+  expect(toolMessage(result)?.content).not.toContain(OTHER_ANSWER);
+  expect(server.requests).toHaveLength(2);
+});
+
+it.each([
+  { name: "straight through", outer: false },
+  { name: "replayed after an outer middleware pauses", outer: true },
+])("with onError: 'block' a failed check is a block, $name", async (c) => {
+  const server = fakeDrex([{ status: 500, body: {} }]);
+  const ran: string[] = [];
+  const pauseAfter = createMiddleware({
+    name: "PauseAfter",
+    wrapToolCall: async (request, handler) => {
+      const result = await handler(request);
+      interrupt({ kind: "audit" });
+      return result;
+    },
+  });
+  const gate = naceAutoModeMiddleware({
+    classifierOptions: offline(server.fetch, { maxRetries: 0 }),
+    onError: "block",
+  });
+  const make = (replies: AIMessage[]) =>
+    createAgent({
+      model: new ScriptedChatModel(replies),
+      tools: [sendTool(ran)],
+      checkpointer: shared,
+      middleware: c.outer ? [pauseAfter, gate] : [gate],
+    });
+  const shared = new MemorySaver();
+  const config = { configurable: { thread_id: `block-${c.name}` } };
+  let result: any = await make([sendCall(), new AIMessage("done")]).invoke(
+    { messages: [new HumanMessage("Send the report")] },
+    config,
+  );
+  if (c.outer) {
+    // The block is replayed from the checkpoint; Drex is not asked again.
+    expect(result.__interrupt__).toHaveLength(1);
+    expect(result.__interrupt__[0].value).toEqual({ kind: "audit" });
+    result = await make([new AIMessage("done")]).invoke(
+      new Command({ resume: { type: "approve" } }),
+      config,
+    );
+  }
+  expect(result.__interrupt__).toBeUndefined();
+  expect(ran).toEqual([]);
+  const message = toolMessage(result);
+  expect(message?.status).toBe("error");
+  expect(message?.content).toContain("its risk could not be checked");
+  // The agent went on to its next model turn.
+  expect(
+    result.messages.some((m: unknown) => AIMessage.isInstance(m) && m.content === "done"),
+  ).toBe(true);
+  expect(server.requests).toHaveLength(1);
+});
+
+it("does not carry an id-keyed approval over to a call edited with updateState", async () => {
+  const server = fakeDrex([ASK, ASK]);
+  const ran: string[] = [];
+  const agent = agentOver(server, new MemorySaver(), ran, [
+    sendCallWith({ target: "public" }),
+    new AIMessage("done"),
+  ]);
+  const config = { configurable: { thread_id: "update-id-keyed" } };
+  const paused: any = await agent.invoke(
+    { messages: [new HumanMessage("Send the report")] },
+    config,
+  );
+  expect(paused.__interrupt__).toHaveLength(1);
+  const original = paused.__interrupt__[0].id;
+  await replacePausedCall(agent, config, { target: "secret" });
+  const again: any = await agent.invoke(
+    new Command({ resume: { [original]: { type: "approve" } } }),
+    config,
+  );
+  // The old approval doesn't apply: "secret" didn't run and is waiting for its own answer.
+  expect(ran).toEqual([]);
+  expect(again.__interrupt__).toHaveLength(1);
+  expect(again.__interrupt__[0].value.args).toEqual({ target: "secret" });
+  expect(again.__interrupt__[0].id).not.toBe(original);
+  expect(server.requests).toHaveLength(2);
 });

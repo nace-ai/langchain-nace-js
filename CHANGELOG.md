@@ -11,13 +11,14 @@
 - Pin the resolved destination in serialization and use provider-specific secret references.
 - Strip Vercel bypass headers for custom hosts and refuse HTTP redirects.
 - Match OpenRouter by exact hostname, including its DNS trailing-dot form.
-- Document upgrading from 0.1.0 and replacing credentials used with custom providers.
 - Document Drex Max's current limit of 512 questions per request.
 - Restore NACE_BASE_URL with NACE_API_KEY for on-prem and other custom endpoints; OpenRouter reads OPENROUTER_API_KEY and never the Nace key; reject credentials in base URLs.
+- Withdraw 0.1.0 from npm.
+- Credit @langchain/typesafe (MIT) in THIRD_PARTY_NOTICES.md.
 
 ## 0.1.0
 
-First release.
+First release. Withdrawn from npm; use 0.1.1 or later.
 
 Before release, a review found and fixed: an API key printed by `console.log(router)`; the tool gate reusing a cached verdict for a different call with the same tool call id; OpenAI `input_image`, Anthropic `source` and Google `media` image blocks sent as text; cancellation and `timeout` not aborting the HTTP request; an unsendable screenshot blocking every later call; `__proto__` keys dropped; noul criteria with unknown keys dropped silently.
 

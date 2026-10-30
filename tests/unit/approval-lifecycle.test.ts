@@ -4,7 +4,7 @@ import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
 import { Command, interrupt, MemorySaver, task } from "@langchain/langgraph";
 import { createAgent, createMiddleware } from "langchain";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import * as z from "zod/v4";
 import {
   AskHuman,
@@ -14,6 +14,13 @@ import {
   thresholdPolicy,
 } from "../../src/middleware/index.js";
 import { fakeDrex, offline, okBody, type Reply, ScriptedChatModel } from "./helpers.js";
+
+// Lets a test switch off the gate's look at the task's scratchpad (see the last test).
+const scratchpad = vi.hoisted(() => ({ hidden: false }));
+vi.mock("@langchain/langgraph", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@langchain/langgraph")>();
+  return { ...actual, getConfig: () => (scratchpad.hidden ? undefined : actual.getConfig()) };
+});
 
 const RED = readFileSync(new URL("../fixtures/red.png", import.meta.url));
 const BLUE = readFileSync(new URL("../fixtures/blue.png", import.meta.url));
@@ -52,6 +59,8 @@ const sendCall = () =>
 
 const toolMessage = (result: { messages: unknown[] }) =>
   result.messages.find((m): m is ToolMessage => ToolMessage.isInstance(m));
+
+const OTHER_ANSWER = "an answer was waiting that was given for a different decision";
 
 /** Pause on one gated call with a first agent, then build a second agent (another worker). */
 async function pauseThenRebuild(options: {
@@ -526,8 +535,9 @@ it.each([
   const paused = await agent.invoke({ messages: [new HumanMessage("Send the report")] }, config);
   expect((paused as any).__interrupt__).toHaveLength(1);
   await replacePausedCall(agent, config, { target: c.edited });
-  await agent.invoke(new Command({ resume: { type: c.answer } }), config);
+  const result = await agent.invoke(new Command({ resume: { type: c.answer } }), config);
   expect(ran).toEqual([]);
+  expect(toolMessage(result)?.content).toContain(OTHER_ANSWER);
 });
 
 it("does not apply a reject to a fresh decision on a superseded checkpoint", async () => {
@@ -541,10 +551,11 @@ it("does not apply a reject to a fresh decision on a superseded checkpoint", asy
   const checkpoint_id = (await (agent as any).getState(config)).config.configurable.checkpoint_id;
   await agent.invoke(new Command({ resume: { type: "approve" } }), config);
   expect(ran).toEqual(["send"]);
-  await agent.invoke(new Command({ resume: { type: "reject" } }), {
+  const forked = await agent.invoke(new Command({ resume: { type: "reject" } }), {
     configurable: { thread_id, checkpoint_id },
   });
   expect(ran).toEqual(["send"]);
+  expect(toolMessage(forked)?.content).toContain(OTHER_ANSWER);
 });
 
 it("keeps a rejection when a retry middleware records its own task between attempts", async () => {
@@ -581,8 +592,12 @@ it("keeps a rejection when a retry middleware records its own task between attem
     config,
   );
   expect((paused as any).__interrupt__).toHaveLength(1);
-  await make([new AIMessage("done")]).invoke(new Command({ resume: { type: "reject" } }), config);
+  const result = await make([new AIMessage("done")]).invoke(
+    new Command({ resume: { type: "reject" } }),
+    config,
+  );
   expect(ran).toEqual([]);
+  expect(toolMessage(result)?.content).toContain(OTHER_ANSWER);
 });
 
 class Configurable extends GateDecision {
@@ -633,4 +648,24 @@ it.each([
     config,
   );
   expect(ran).toEqual([]);
+});
+
+it("blocks through AskHuman alone when the gate can't see the waiting answer", async () => {
+  const server = fakeDrex([ASK, ASK]);
+  const ran: string[] = [];
+  const agent = agentOver(server, new MemorySaver(), ran, [
+    sendCallWith({ target: "public" }),
+    new AIMessage("done"),
+  ]);
+  const config = { configurable: { thread_id: "no-probe" } };
+  await agent.invoke({ messages: [new HumanMessage("Send the report")] }, config);
+  await replacePausedCall(agent, config, { target: "secret" });
+  scratchpad.hidden = true;
+  try {
+    const result = await agent.invoke(new Command({ resume: { type: "approve" } }), config);
+    expect(ran).toEqual([]);
+    expect(toolMessage(result)?.content).toContain(OTHER_ANSWER);
+  } finally {
+    scratchpad.hidden = false;
+  }
 });

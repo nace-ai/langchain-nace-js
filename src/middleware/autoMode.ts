@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 
 import { ToolMessage } from "@langchain/core/messages";
-import { interrupt, task } from "@langchain/langgraph";
+import { getConfig, interrupt, task } from "@langchain/langgraph";
 import { createMiddleware } from "langchain";
 
 import { isTextOnly, NaceClassifier, type NaceClassifierFields } from "../classifier.js";
@@ -22,6 +22,9 @@ import { isUserMessage, latestImages, withoutMedia } from "./media.js";
 
 /** Statuses after which a request with screenshots is retried once without them. */
 const IMAGE_RETRY_STATUSES = new Set([400, 413, 422]);
+
+/** Why a call is blocked when a person's answer is waiting but the decision is new. */
+const ANSWER_FOR_ANOTHER_DECISION = "an answer was waiting that was given for a different decision";
 
 /** The id of the TypeSafe-style question, when `instructions`/`criteria` are given. */
 const TYPESAFE_RISK_ID = "is_risky";
@@ -125,6 +128,12 @@ export interface GateContext {
   blocked(text: string): ToolMessage;
   /** The text for a block with the given reason (honours `blockedMessage`). */
   blockedText(reason: string): string;
+  /**
+   * `true` when this decision was made just now, not replayed from the checkpoint. An
+   * `interrupt()` that returns an answer instead of pausing then holds an answer that was
+   * given for a different decision.
+   */
+  fresh?: boolean;
 }
 
 /** What to do with a tool call. Implement `apply` for custom behaviour. */
@@ -226,6 +235,13 @@ export class AskHuman extends GateDecision {
           "it needs a person's approval and the agent has no checkpointer to pause for one " +
             "(give the agent a checkpointer, or set askHuman: false)",
         ),
+      );
+    }
+    // A decision made just now has no answer yet. One that is already here was given for a
+    // different decision (an edited state, an earlier checkpoint): it must not apply to this.
+    if (context.fresh === true) {
+      return context.blocked(
+        context.blockedText(`${ANSWER_FOR_ANOTHER_DECISION}; request a new tool call`),
       );
     }
     const kind = isRecord(answer) ? answer.type : undefined;
@@ -372,6 +388,24 @@ function decisionKind(decision: GateDecision): string {
   if (decision instanceof Block) return "block";
   if (decision instanceof Allow) return "allow";
   return `custom:${decision.constructor.name}`;
+}
+
+/**
+ * Whether the next `interrupt()` in this task already has an answer (a resume value) waiting.
+ * LangGraph has no public API for this, so it reads the task's scratchpad, the same fields
+ * `interrupt()` itself reads; `undefined` when they aren't there.
+ */
+function answerWaiting(): boolean | undefined {
+  let pad: unknown;
+  try {
+    pad = getConfig()?.configurable?.__pregel_scratchpad;
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(pad) || typeof pad.interruptCounter !== "number" || !Array.isArray(pad.resume)) {
+    return undefined;
+  }
+  return pad.resume.length > pad.interruptCounter + 1 || pad.nullResume !== undefined;
 }
 
 /**
@@ -524,12 +558,16 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
     return { decision: policy(verdict), verdict };
   }
 
-  /** Re-derive a paused call's decision from its checkpointed record. */
-  function replay(record: unknown, callId: string | null, inputKey: string | null): Selected {
-    const stop = (reason: string, verdict?: GateVerdict): Selected => ({
+  /** Block the call; the model is told to request it again. */
+  function stop(reason: string, verdict?: GateVerdict): Selected {
+    return {
       decision: new Block(`${reason}; request a new tool call`),
       ...(verdict ? { verdict } : {}),
-    });
+    };
+  }
+
+  /** Re-derive a paused call's decision from its checkpointed record. */
+  function replay(record: unknown, callId: string | null, inputKey: string | null): Selected {
     if (!isGateRecord(record)) return stop("the paused decision could not be read");
     if (record.response === null) return stop("the paused decision could not be read");
     let selected: Selected;
@@ -568,6 +606,7 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
       const threadId = runtime?.configurable?.thread_id;
       const signal = runtime?.signal;
       let selected: Selected;
+      let fresh = false;
       try {
         signal?.throwIfAborted();
         let attempts = await attemptsFor(gated);
@@ -646,7 +685,19 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
         }
         const failure = now.failure as { error: unknown } | undefined;
         if (failure !== undefined) throw failure.error;
-        selected = now.selected ?? replay(stored, callId, inputKey);
+        const decidedNow = now.selected as Selected | undefined;
+        if (decidedNow !== undefined) {
+          fresh = true;
+          // A decision made now has no answer of its own. One that is already waiting for the
+          // next `interrupt()` was given for something else (an edited state, an earlier
+          // checkpoint), so whatever Drex says now, the call is blocked.
+          selected =
+            answerWaiting() === true
+              ? stop(ANSWER_FOR_ANOTHER_DECISION, decidedNow.verdict)
+              : decidedNow;
+        } else {
+          selected = replay(stored, callId, inputKey);
+        }
         signal?.throwIfAborted();
       } catch (error) {
         selected = failed(error, signal);
@@ -671,6 +722,7 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
       };
       const context: GateContext = {
         blockedText,
+        fresh,
         blocked: (text) =>
           new ToolMessage({
             content: text,

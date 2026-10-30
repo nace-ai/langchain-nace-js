@@ -13,6 +13,9 @@ const ns = baseNs.sub("nace");
 
 export const BILLING_URL = "https://console.nace.ai/dashboard/billing";
 
+/** Where an OpenRouter user adds credits, for a 402 from that backend. */
+export const OPENROUTER_CREDITS_URL = "https://openrouter.ai/settings/credits";
+
 /** A `{ path, message }` validation issue from Drex. */
 export interface Issue {
   path: string;
@@ -302,7 +305,13 @@ function describe(
   text = clip(text, MAX_MESSAGE_CHARS);
   // Guidance is added after clipping, so a long body can't push it out.
   const guidance: string[] = [];
-  if (status === 402) guidance.push(`Add funds at ${BILLING_URL}`);
+  if (status === 402) {
+    guidance.push(
+      provider === "OpenRouter"
+        ? `Add credits at ${OPENROUTER_CREDITS_URL}`
+        : `Add funds at ${BILLING_URL}`,
+    );
+  }
   if (requestId) guidance.push(`(request_id=${requestId})`);
   if (guidance.length > 0) text += `\n${clip(guidance.join("\n"), MAX_GUIDANCE_CHARS)}`;
   return text;

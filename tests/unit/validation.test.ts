@@ -4,14 +4,15 @@ import { tool } from "@langchain/core/tools";
 import { createAgent } from "langchain";
 import { describe, expect, it } from "vitest";
 import * as z from "zod/v4";
-import { BILLING_URL } from "../../src/errors.js";
 import {
+  BILLING_URL,
   type ClassificationResponse,
   NaceAPIResponseValidationError,
   NaceClassifier,
   NaceError,
   NaceInsufficientCreditError,
   naceConditionalEdge,
+  OPENROUTER_CREDITS_URL,
 } from "../../src/index.js";
 import { naceAutoModeMiddleware, verdictFromResponse } from "../../src/middleware/index.js";
 import { parseResponse } from "../../src/types.js";
@@ -270,5 +271,38 @@ describe("error size", () => {
     );
     expect(error.message).toContain(`Add funds at ${BILLING_URL}`);
     expect(error.message.length).toBeLessThanOrEqual(MAX + 1 + GUIDANCE);
+  });
+});
+
+describe("402 guidance", () => {
+  const noFunds = async () =>
+    new Response(JSON.stringify({ error: { message: "No available funds" } }), {
+      status: 402,
+      headers: { "content-type": "application/json" },
+    });
+  const q = { q: { type: "noul" as const, instructions: "?" } };
+
+  it("sends an OpenRouter user to OpenRouter's credits page", async () => {
+    const error = await new NaceClassifier({
+      apiKey: "sk-or-test",
+      baseUrl: "https://openrouter.ai/api/v1",
+      questions: q,
+      fetch: noFunds as typeof globalThis.fetch,
+    })
+      .invoke("x")
+      .catch((e) => e);
+    expect(OPENROUTER_CREDITS_URL).toBe("https://openrouter.ai/settings/credits");
+    expect(error.message).toContain(`Add credits at ${OPENROUTER_CREDITS_URL}`);
+    expect(error.message).not.toContain(BILLING_URL);
+  });
+
+  it("sends a Drex user to the Drex billing page", async () => {
+    const error = await new NaceClassifier(
+      offline(noFunds as typeof globalThis.fetch, { questions: q }),
+    )
+      .invoke("x")
+      .catch((e) => e);
+    expect(error.message).toContain(`Add funds at ${BILLING_URL}`);
+    expect(error.message).not.toContain("openrouter.ai");
   });
 });

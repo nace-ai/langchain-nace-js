@@ -377,7 +377,15 @@ export class NaceClassifier extends Runnable<
     options?: Partial<NaceClassifierCallOptions> | Partial<NaceClassifierCallOptions>[],
     batchOptions?: RunnableBatchOptions,
   ): Promise<(ClassificationResponse | Error)[]> {
-    const state: BatchState = { owner: this, stopped: false, stops: new WeakSet() };
+    // A batch started while one of this classifier's batches is running (an `invoke`
+    // override answering its input with `this.batch`) runs inside that batch's fate.
+    const active = batchContext.getStore();
+    const state: BatchState = {
+      owner: this,
+      parent: active?.owner === this ? active : undefined,
+      stopped: false,
+      stops: new WeakSet(),
+    };
     // Everything below runs in this batch's context, which `classify` reads right
     // before it sends: the stop reaches it whatever an overridden `invoke` does with
     // the options, and every input keeps its own run.
@@ -388,8 +396,9 @@ export class NaceClassifier extends Runnable<
           maxConcurrency: batchOptions?.maxConcurrency ?? this.maxConcurrency,
         })
         .catch((error: unknown) => {
-          // Another input's stop may reject first; report the failure behind it.
-          const reason = state.stops.has(error as object) ? state.cause : error;
+          // Another input's stop may reject first; report the failure behind it, which
+          // may be an enclosing batch's.
+          const reason = state.stops.has(error as object) ? (error as Error).cause : error;
           state.stopped = true;
           state.cause ??= reason;
           throw reason;
@@ -457,10 +466,11 @@ export class NaceClassifier extends Runnable<
     if (prepared.images.length > 0) request.images = prepared.images;
     const batch = batchContext.getStore();
     const current = batch?.owner === this ? batch : undefined;
-    if (current?.stopped) {
+    const stopped = current ? stoppedBatch(current) : undefined;
+    if (current && stopped) {
       const stop = new NaceBatchStoppedError(
         "Not sent: an earlier request in this batch failed, and this one would too.",
-        { cause: current.cause },
+        { cause: stopped.cause },
       );
       current.stops.add(stop);
       throw stop;
@@ -478,8 +488,11 @@ export class NaceClassifier extends Runnable<
       const converted = convertError(error, this.provider);
       // Recorded before the error leaves the request, so before any callback runs.
       if (current && stopsBatch(converted)) {
-        current.stopped = true;
-        current.cause ??= converted;
+        // The key or the account can't be used: this batch and the ones it runs in stop.
+        for (let level: BatchState | undefined = current; level; level = level.parent) {
+          level.stopped = true;
+          level.cause ??= converted;
+        }
       }
       throw converted;
     }
@@ -496,6 +509,8 @@ function stopsBatch(error: unknown): boolean {
 /** What `batch` shares with the requests it dispatches. */
 interface BatchState {
   owner: NaceClassifier;
+  /** The batch of this classifier this one was started inside, if any. */
+  parent?: BatchState;
   stopped: boolean;
   /** The failure that stopped the batch. */
   cause?: unknown;
@@ -505,6 +520,14 @@ interface BatchState {
 
 /** The batch a request belongs to, if any; set by `batch`, read by `classify`. */
 const batchContext = new AsyncLocalStorage<BatchState>();
+
+/** The batch, or the nearest enclosing one, that has stopped. */
+function stoppedBatch(batch: BatchState): BatchState | undefined {
+  for (let level: BatchState | undefined = batch; level; level = level.parent) {
+    if (level.stopped) return level;
+  }
+  return undefined;
+}
 
 /** OpenRouter takes images as `image_url` parts of a `state` content array. */
 function openRouterState(state: unknown, images: ImageInput[]): unknown[] {

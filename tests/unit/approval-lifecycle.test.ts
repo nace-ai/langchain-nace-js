@@ -643,11 +643,13 @@ it.each([
     policy: first(),
   }).invoke({ messages: [new HumanMessage("Send the report")] }, config);
   expect((paused as any).__interrupt__).toHaveLength(1);
-  await agentOver(server, saver, ran, [new AIMessage("done")], { policy: rebuilt() }).invoke(
-    new Command({ resume: { type: "reject" } }),
-    config,
-  );
+  const result = await agentOver(server, saver, ran, [new AIMessage("done")], {
+    policy: rebuilt(),
+  }).invoke(new Command({ resume: { type: "reject" } }), config);
   expect(ran).toEqual([]);
+  expect(toolMessage(result)?.content).toContain(
+    "a custom decision without an id can't be resumed",
+  );
 });
 
 it("blocks through AskHuman alone when the gate can't see the waiting answer", async () => {
@@ -668,4 +670,39 @@ it("blocks through AskHuman alone when the gate can't see the waiting answer", a
   } finally {
     scratchpad.hidden = false;
   }
+});
+
+class IdentifiedAsk extends GateDecision {
+  constructor(readonly id: string) {
+    super();
+  }
+
+  async apply(request: any, handler: any, verdict: any, context: any) {
+    return new AskHuman().apply(request, handler, verdict, context);
+  }
+}
+
+it.each([
+  { rebuiltId: "review-v1", ran: ["send"], text: undefined },
+  { rebuiltId: "review-v2", ran: [], text: "policy changed while the call was paused" },
+])("resumes a custom decision only under its own id: rebuilt as $rebuiltId", async (c) => {
+  const server = fakeDrex([ASK]);
+  const saver = new MemorySaver();
+  const ran: string[] = [];
+  const base = thresholdPolicy();
+  const policy = (id: string) => (v: GateVerdict) => {
+    const d = base(v);
+    return d instanceof AskHuman ? new IdentifiedAsk(id) : d;
+  };
+  const config = { configurable: { thread_id: `identified-${c.rebuiltId}` } };
+  const paused = await agentOver(server, saver, ran, [sendCall(), new AIMessage("done")], {
+    policy: policy("review-v1"),
+  }).invoke({ messages: [new HumanMessage("Send the report")] }, config);
+  expect((paused as any).__interrupt__).toHaveLength(1);
+  const result = await agentOver(server, saver, ran, [new AIMessage("done")], {
+    policy: policy(c.rebuiltId),
+  }).invoke(new Command({ resume: { type: "approve" } }), config);
+  expect(ran).toEqual(c.ran);
+  expect(server.requests).toHaveLength(1);
+  if (c.text) expect(toolMessage(result)?.content).toContain(c.text);
 });

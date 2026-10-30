@@ -138,6 +138,13 @@ export interface GateContext {
 
 /** What to do with a tool call. Implement `apply` for custom behaviour. */
 export abstract class GateDecision {
+  /**
+   * A stable id for a custom decision, covering any configuration that changes what it
+   * does. Custom decisions without one can't be resumed after a pause: the call is blocked
+   * and must be requested again.
+   */
+  readonly id?: string;
+
   abstract apply<R extends GatedToolCall>(
     request: R,
     handler: Handler<R>,
@@ -382,12 +389,19 @@ function isGateRecord(value: unknown): value is GateRecord {
   );
 }
 
-/** A stable name for a decision's behaviour, to detect a policy change on resume. */
-function decisionKind(decision: GateDecision): string {
-  if (decision instanceof AskHuman) return "ask";
-  if (decision instanceof Block) return "block";
-  if (decision instanceof Allow) return "allow";
-  return `custom:${decision.constructor.name}`;
+/**
+ * A stable name for a decision's behaviour, to detect a policy change on resume. The
+ * built-ins match by exact class (a subclass can behave differently); a custom decision
+ * is identified by its `id`, and `undefined` when it has none.
+ */
+function decisionKind(decision: GateDecision): string | undefined {
+  const type: unknown = decision.constructor;
+  if (type === AskHuman) return "ask";
+  if (type === Block) return "block";
+  if (type === Allow) return "allow";
+  return typeof decision.id === "string" && decision.id !== ""
+    ? `custom:${decision.id}`
+    : undefined;
 }
 
 /**
@@ -583,7 +597,12 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
     if (record.callId !== callId || record.inputKey === null || record.inputKey !== inputKey) {
       return stop("the decision context changed while the call was paused", selected.verdict);
     }
-    if (decisionKind(selected.decision) !== record.decision) {
+    // Only a decision with an id can be told apart from a different one with the same class.
+    const kind = decisionKind(selected.decision);
+    if (record.decision === "custom" || kind === undefined) {
+      return stop("a custom decision without an id can't be resumed", selected.verdict);
+    }
+    if (kind !== record.decision) {
       return stop("the gate's policy changed while the call was paused", selected.verdict);
     }
     return selected;
@@ -651,7 +670,7 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
               ...base,
               response: JSON.stringify(response.raw),
               requestId: response.requestId ?? null,
-              decision: decisionKind(selected.decision),
+              decision: decisionKind(selected.decision) ?? "custom",
               error: null,
             };
           } catch (error) {

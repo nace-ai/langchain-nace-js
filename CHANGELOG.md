@@ -12,6 +12,7 @@
 - Strip Vercel bypass headers for custom hosts and refuse HTTP redirects.
 - Match OpenRouter by exact hostname, including its DNS trailing-dot form.
 - Document upgrading from 0.1.0 and replacing credentials used with custom providers.
+- Document Drex Max's current limit of 512 questions per request.
 
 ## 0.1.0
 

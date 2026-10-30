@@ -69,6 +69,50 @@ function isNaceDestination(baseUrl: string): boolean {
   }
 }
 
+function hasUserinfo(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    return url.username !== "" || url.password !== "";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The key for `baseUrl`. An explicit `apiKey` always wins. Otherwise the key
+ * follows the endpoint: `OPENROUTER_API_KEY` for the exact OpenRouter host (never
+ * the Nace key), and `NACE_API_KEY` for the Nace hosts or an endpoint that also
+ * came from the environment (`NACE_BASE_URL`, e.g. on-prem). A custom `baseUrl`
+ * passed in code needs its own `apiKey`.
+ */
+function resolveApiKey(
+  explicit: string | undefined,
+  baseUrl: string,
+  explicitBaseUrl: boolean,
+): string {
+  if (explicit !== undefined) {
+    const key = explicit.trim();
+    if (!key) throw new NaceError("`apiKey` must not be empty.");
+    return key;
+  }
+  if (isOpenRouter(baseUrl)) {
+    const key = env("OPENROUTER_API_KEY");
+    if (!key) throw new NaceError("OpenRouter needs `apiKey` or `OPENROUTER_API_KEY`.");
+    return key;
+  }
+  if (explicitBaseUrl && !isNaceDestination(baseUrl)) {
+    throw new NaceError(
+      "A custom `baseUrl` needs an explicit `apiKey`. To use `NACE_API_KEY`, " +
+        "set the endpoint with `NACE_BASE_URL` instead of `baseUrl`.",
+    );
+  }
+  const key = env("NACE_API_KEY");
+  if (!key) {
+    throw new NaceError("A Drex API key is required. Pass `apiKey` or set `NACE_API_KEY`.");
+  }
+  return key;
+}
+
 function providerHeaders(baseUrl: string, headers?: HeadersInit): Headers {
   const result = new Headers(headers);
   if (!isNaceDestination(baseUrl)) {
@@ -90,7 +134,10 @@ export interface NaceClassifierFields {
    * `drex-v2.0` is text-only and has the same question-count limit.
    */
   model?: string;
-  /** Provider key. Defaults to `NACE_API_KEY` only on supported Nace HTTPS hosts. */
+  /**
+   * Provider key. Defaults to `NACE_API_KEY` for the Nace hosts and for an
+   * endpoint set with `NACE_BASE_URL`; `OPENROUTER_API_KEY` for OpenRouter.
+   */
   apiKey?: string;
   /**
    * API root. Defaults to `NACE_BASE_URL`, else `https://console.nace.ai`.
@@ -205,21 +252,18 @@ export class NaceClassifier extends Runnable<
     // `lc_kwargs` is enumerable and serialized. Custom headers can hold arbitrary
     // credentials, so keep them transport-only alongside the key and fetch.
     const { apiKey: _key, fetch: _fetch, defaultHeaders: _headers, ...kwargs } = fields;
-    let baseUrl = fields.baseUrl?.trim() || env("NACE_BASE_URL") || DEFAULT_BASE_URL;
+    const explicitBaseUrl = fields.baseUrl?.trim() || undefined;
+    let baseUrl = explicitBaseUrl ?? env("NACE_BASE_URL") ?? DEFAULT_BASE_URL;
     while (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1);
     const defaultHeaders = Object.fromEntries(providerHeaders(baseUrl, fields.defaultHeaders));
     super({ ...kwargs, baseUrl });
 
-    if (fields.apiKey !== undefined && !fields.apiKey.trim()) {
-      throw new NaceError("`apiKey` must not be empty.");
+    if (hasUserinfo(baseUrl)) {
+      throw new NaceError(
+        "`baseUrl` must not contain a user name or password; pass the key as `apiKey`.",
+      );
     }
-    if (fields.apiKey === undefined && !isNaceDestination(baseUrl)) {
-      throw new NaceError("A custom destination requires an explicit provider `apiKey`.");
-    }
-    const apiKey = fields.apiKey?.trim() ?? env("NACE_API_KEY");
-    if (!apiKey) {
-      throw new NaceError("A Drex API key is required. Pass `apiKey` or set `NACE_API_KEY`.");
-    }
+    const apiKey = resolveApiKey(fields.apiKey, baseUrl, explicitBaseUrl !== undefined);
     const model = (fields.model ?? env("NACE_DEFAULT_DECISION_MODEL") ?? DEFAULT_MODEL).trim();
     if (!model) {
       throw new NaceError("`model` must not be empty.");

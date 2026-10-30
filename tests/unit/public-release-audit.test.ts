@@ -264,3 +264,11 @@ it.each([
   // A resume reuses the checkpointed verdict; it never asks Drex again.
   expect(drex.requests).toHaveLength(1);
 });
+
+it("ships the third-party notice", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+  expect(pkg.files).toContain("THIRD_PARTY_NOTICES.md");
+  const notice = readFileSync(new URL("../../THIRD_PARTY_NOTICES.md", import.meta.url), "utf8");
+  expect(notice).toContain("Copyright (c) LangChain, Inc.");
+  expect(notice).toContain("@langchain/typesafe");
+});

@@ -12,6 +12,7 @@
 - Strip Vercel bypass headers for custom hosts and refuse HTTP redirects.
 - Match OpenRouter by exact hostname, including its DNS trailing-dot form.
 - Document upgrading from 0.1.0 and replacing credentials used with custom providers.
+- Restore NACE_BASE_URL with NACE_API_KEY for on-prem and other custom endpoints; OpenRouter reads OPENROUTER_API_KEY and never the Nace key; reject credentials in base URLs.
 
 ## 0.1.0
 

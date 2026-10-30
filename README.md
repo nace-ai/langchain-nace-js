@@ -245,9 +245,26 @@ Custom `defaultHeaders` are sent on requests but omitted from object inspection 
 
 ### Credentials and custom providers
 
-`NACE_API_KEY` is read automatically only for HTTPS on port 443 at
-`console.nace.ai` and its legacy production alias `drex.nace.ai`. Other hosts, including localhost, require an explicit
-provider key. A blank explicit key is refused.
+An explicit `apiKey` always wins; a blank one is refused. Without it, the key
+follows the endpoint:
+
+- `console.nace.ai` and its legacy production alias `drex.nace.ai` (HTTPS, port
+  443) use `NACE_API_KEY`.
+- An endpoint set with `NACE_BASE_URL`, such as an on-prem deployment, also uses
+  `NACE_API_KEY`:
+
+  ```sh
+  export NACE_API_KEY=... NACE_BASE_URL=https://nace.customer.example
+  ```
+
+  ```ts
+  const classifier = new NaceClassifier();
+  ```
+
+- OpenRouter (`https://openrouter.ai/api/v1`) uses `OPENROUTER_API_KEY`, never
+  `NACE_API_KEY`, even with `openrouter: false`.
+- A custom `baseUrl` in code needs its own `apiKey`. To use `NACE_API_KEY` for a
+  custom endpoint, set it with `NACE_BASE_URL` instead.
 
 ```ts
 const classifier = new NaceClassifier({
@@ -256,11 +273,14 @@ const classifier = new NaceClassifier({
 });
 ```
 
-Pass the same settings through `classifierOptions` when constructing a router.
-Vercel bypass headers are stripped for custom destinations. Requests refuse HTTP
-redirects; configure the final API URL directly. Serialized classifiers keep the
-resolved destination and use `OPENROUTER_API_KEY` for OpenRouter or
-`NACE_CUSTOM_API_KEY` for other custom hosts.
+A base URL that contains a user name or password is refused; pass the key as
+`apiKey`. Pass the same settings through `classifierOptions` when constructing a
+router. Vercel bypass headers are stripped for custom destinations. Requests
+refuse HTTP redirects; configure the final API URL directly. Serialized
+classifiers keep the resolved destination and use `OPENROUTER_API_KEY` for
+OpenRouter or `NACE_CUSTOM_API_KEY` for other custom hosts. A classifier
+serialized for a custom endpoint refers to `NACE_CUSTOM_API_KEY`; pass that one
+secret in `load`'s `secretsMap`.
 
 **Upgrading from 0.1.0:** that version could send `NACE_API_KEY` to a custom
 provider when no explicit `apiKey` was supplied. Upgrade to 0.1.1 or later.

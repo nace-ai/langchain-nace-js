@@ -211,8 +211,15 @@ It answers three questions: a risk score, "destructive?" and "did the user ask f
 - **Asking a person** raises a LangGraph `interrupt` with a `{ type: "nace_tool_approval", name, args, verdict, … }` value. Resume with `new Command({ resume })`, where `resume` is `{ type: "approve" }`, `{ type: "reject", message }` or `{ type: "edit", args }`.
   - Asking needs a checkpointer. Without one the call is blocked, and the message says so. Use `askHuman: false` to always block instead.
 - **If Drex can't answer, the call is blocked** (`onError: "block"`). A screenshot Drex can't read is dropped, and the check runs again without it.
+  - With `onError: "throw"`, a failed check (including a `screenshots` function that throws) fails the run, and retrying the run (`invoke(null)`) checks again. In a run with a `thread_id`, LangGraph doesn't let an outer middleware catch it and continue: `agent.invoke` rejects with the error itself (for example a `NaceAPIError`), or with an `AggregateError` whose `errors` include it when an outer middleware keeps scheduling tasks after catching it. Without a `thread_id`, or outside a LangGraph run, the gate decides directly, and its error is an ordinary error that outer middleware may catch.
+  - With `onError: "block"` the block is saved like any other decision, so a resume replays the same block without capturing screenshots or asking Drex again.
 - **Everything is replaceable:** pass `questions`, `thresholdPolicy({ ... })`, or your own `(verdict) => GateDecision`.
-- **Resuming:** the gate keeps its first verdict in memory, so resuming asks Drex once. A resume in another process asks Drex again.
+- **Resuming:** each checked call's decision is saved in the agent's checkpoint, as a LangGraph task named `NaceGateDecision`: Drex's answer, the decision, and a digest of what Drex saw (never screenshots or keys). A resume, on any worker, replays that decision and does not ask Drex again. If the conversation, the tool call, the screenshots or the policy's decision changed while the call was paused, the call is blocked and must be requested again, and so it is when the current screenshots can't be captured to compare; an earlier answer can't authorize something else. Completed calls and new turns are checked again.
+  - Editing the paused state (for example with `updateState`) or resuming an earlier checkpoint makes LangGraph run the tool call as a new task, so the gate checks it again as a new call. A plain resume value waiting for it blocks the call, and answers addressed by id to the earlier pause don't carry over (neither an approval nor a rejection).
+  - A custom `GateDecision` needs an `id` to be resumed after a pause; without one the call is blocked and must be requested again.
+  - With a checkpointer, each checked call adds one checkpoint write, and the task appears in traces and in the `updates`, `tasks` and `debug` stream modes.
+  - Approving several parallel calls needs `createAgent`'s default `version: "v2"`.
+  - On a resume, LangGraph runs the tool step again from the start, so the code around the gate must call LangGraph tasks and interrupts in the same order every time. Put the gate first in `middleware`, before any retry middleware, so a retried tool is checked once: a retry wrapped around the gate can resume an earlier decision when the tool fails only sometimes. A `screenshots` function must not call LangGraph `task()` or `interrupt()`.
 
 ### `naceModelRouterMiddleware`: the model picker
 
@@ -233,6 +240,8 @@ The router picks the model once per run. Below `minConfidence` (default 0.6), or
 | TypeSafe-compatible hosts | the host's System One root     | same request format as Nace                                                                |
 
 Every request sends `User-Agent` and `X-Nace-Client: langchain-nace-js/<version>`. On OpenRouter it also sends `HTTP-Referer` and `X-OpenRouter-Title`.
+
+Custom `defaultHeaders` are sent on requests but omitted from object inspection and serialized classifiers because they may contain credentials. Construct a new classifier with those headers when restoring a setup that needs them.
 
 ### Credentials and custom providers
 
@@ -259,6 +268,8 @@ If you used that configuration with real credentials, replace and revoke them;
 an upgrade cannot remove copies already received by another provider. Recreate
 and serialize custom-provider classifiers again: older saved manifests can
 still refer to `NACE_API_KEY`, even after upgrading.
+
+Malformed probabilities, confidence values or score rubrics raise `NaceAPIResponseValidationError`. The default tool-gate error policy blocks the call.
 
 ## Errors
 

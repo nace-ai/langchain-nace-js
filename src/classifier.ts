@@ -115,7 +115,7 @@ export interface NaceClassifierFields {
   openrouter?: boolean;
   /** Extra top-level request body fields, for options Drex adds later. */
   modelKwargs?: Record<string, unknown>;
-  /** Extra request headers. */
+  /** Extra request headers. Transport-only: omitted from inspection and serialization. */
   defaultHeaders?: Record<string, string>;
 }
 
@@ -202,12 +202,13 @@ export class NaceClassifier extends Runnable<
   declare protected client: NaceClient;
 
   constructor(fields: NaceClassifierFields = {}) {
-    // `lc_kwargs` is enumerable; keep the key and the transport out of it.
-    const { apiKey: _key, fetch: _fetch, ...kwargs } = fields;
+    // `lc_kwargs` is enumerable and serialized. Custom headers can hold arbitrary
+    // credentials, so keep them transport-only alongside the key and fetch.
+    const { apiKey: _key, fetch: _fetch, defaultHeaders: _headers, ...kwargs } = fields;
     let baseUrl = fields.baseUrl?.trim() || env("NACE_BASE_URL") || DEFAULT_BASE_URL;
     while (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1);
     const defaultHeaders = Object.fromEntries(providerHeaders(baseUrl, fields.defaultHeaders));
-    super({ ...kwargs, baseUrl, defaultHeaders });
+    super({ ...kwargs, baseUrl });
 
     if (fields.apiKey !== undefined && !fields.apiKey.trim()) {
       throw new NaceError("`apiKey` must not be empty.");

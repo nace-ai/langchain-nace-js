@@ -16,6 +16,7 @@ import {
   type NaceModelRoute,
   naceAutoModeMiddleware,
   naceModelRouterMiddleware,
+  thresholdPolicy,
   verdictFromResponse,
   verdictSummary,
 } from "../../src/middleware/index.js";
@@ -113,6 +114,49 @@ describe.skipIf(!KEY)("tool gate, live Drex", () => {
     expect(seen.risk).toBeGreaterThanOrEqual(0.75);
     expect(blind.risk).toBeLessThan(0.75);
   });
+
+  it.each(["approve", "reject"] as const)(
+    "replays the paused decision on a rebuilt agent without asking Drex again (%s)",
+    async (answer) => {
+      const { ran, tools } = ticketTools();
+      const saver = new MemorySaver();
+      let requests = 0;
+      const counting: typeof fetch = (input, init) => {
+        requests += 1;
+        return globalThis.fetch(input, init);
+      };
+      const make = (replies: AIMessage[]) =>
+        createAgent({
+          model: new ScriptedChatModel(replies),
+          tools,
+          checkpointer: saver,
+          middleware: [
+            naceAutoModeMiddleware({
+              classifier: live("drex-v2.0", { fetch: counting }),
+              // Ask rather than block on a high score, so the test always pauses.
+              policy: thresholdPolicy({ blockAt: 1.01 }),
+            }),
+          ],
+        });
+      const config = { configurable: { thread_id: `lifecycle-${answer}` } };
+      const paused = await make([
+        new AIMessage({
+          content: "",
+          tool_calls: [{ id: "d9", name: "delete_ticket", args: { ticket_id: 9 } }],
+        }),
+        new AIMessage("done"),
+      ]).invoke(
+        { messages: [new HumanMessage("Ticket 9 is a duplicate. Delete ticket 9, nothing else.")] },
+        config,
+      );
+      const interrupts = (paused as { __interrupt__?: { value: any }[] }).__interrupt__;
+      expect(interrupts?.[0]?.value.name, `tools that ran: ${ran}`).toBe("delete_ticket");
+      expect(requests).toBe(1);
+      await make([new AIMessage("done")]).invoke(new Command({ resume: { type: answer } }), config);
+      expect(ran).toEqual(answer === "approve" ? ["delete(9)"] : []);
+      expect(requests).toBe(1);
+    },
+  );
 });
 
 describe.skipIf(!KEY)("model router, live Drex", () => {

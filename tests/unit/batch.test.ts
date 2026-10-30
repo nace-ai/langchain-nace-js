@@ -1,3 +1,4 @@
+import { ensureConfig, mergeConfigs, RunnableLambda } from "@langchain/core/runnables";
 import { expect, it } from "vitest";
 import { NaceBatchStoppedError, NaceClassifier } from "../../src/index.js";
 import { fakeDrex, okBody, type Reply } from "./helpers.js";
@@ -11,11 +12,15 @@ const status = (code: number): Reply => ({
 });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
 
-function classifier(script: (Reply | ((body: any) => Reply))[], extra = {}) {
+function classifierOf(
+  Class: typeof NaceClassifier,
+  script: (Reply | ((body: any) => Reply))[],
+  extra = {},
+) {
   const server = fakeDrex(script);
   return {
     server,
-    classifier: new NaceClassifier({
+    classifier: new Class({
       apiKey: "nace_sk_test",
       baseUrl: "https://drex.test",
       fetch: server.fetch,
@@ -25,6 +30,8 @@ function classifier(script: (Reply | ((body: any) => Reply))[], extra = {}) {
     }),
   };
 }
+const classifier = (script: (Reply | ((body: any) => Reply))[], extra = {}) =>
+  classifierOf(NaceClassifier, script, extra);
 const inputs = Array.from({ length: 20 }, (_, i) => `ticket ${i}`);
 
 it.each([401, 402, 403])(
@@ -345,3 +352,131 @@ it("keeps batch bookkeeping out of callback metadata", async () => {
     ]);
   }
 });
+
+// Overrides that normalise their options before calling `super.invoke`: LangChain's own
+// helpers copy string keys only, so nothing the batch needs may ride on the options.
+const normalisers = {
+  ensureConfig: (options: any) => ensureConfig(options),
+  mergeConfigs: (options: any) => mergeConfigs(options, {}),
+};
+
+it.each(
+  Object.keys(normalisers).flatMap((name) => [
+    [name, false],
+    [name, true],
+  ]) as [keyof typeof normalisers, boolean][],
+)(
+  "sends nothing for an input a %s override started before a 401 (returnExceptions: %s)",
+  async (name, returnExceptions) => {
+    const normalise = normalisers[name];
+    class Normalising extends NaceClassifier {
+      override async invoke(input: any, options?: any) {
+        return super.invoke(input, normalise(options));
+      }
+    }
+    const gate = deferred();
+    const bWaiting = deferred();
+    const aFailed = deferred();
+    const handler = {
+      awaitHandlers: true,
+      handleChainStart: async (_chain: unknown, run: { input?: unknown }) => {
+        if (run.input !== "b") return;
+        bWaiting.resolve();
+        await gate.promise;
+      },
+      handleChainError: () => aFailed.resolve(),
+    };
+    const { server, classifier: c } = classifierOf(Normalising, [status(401)]);
+    const outcome = settled(
+      c.batch(["a", "b"], { maxConcurrency: 2, callbacks: [handler] }, {
+        returnExceptions,
+      } as any) as Promise<any[]>,
+    );
+    await bWaiting.promise;
+    await aFailed.promise;
+    await sleep(20);
+    gate.resolve();
+    const result: any = await outcome;
+    await settle();
+    expect(server.requests.map((r) => r.body.state)).toEqual(["a"]);
+    if (returnExceptions) expect(result.value[1]).toBeInstanceOf(NaceBatchStoppedError);
+    else expect(String(result.error)).toContain("401");
+  },
+);
+
+it.each([false, true])(
+  "shows callbacks what an overridden invoke sends, for inputs not sent too (returnExceptions: %s)",
+  async (returnExceptions) => {
+    const starts: unknown[] = [];
+    const handler = {
+      awaitHandlers: true,
+      handleChainStart: (_chain: unknown, run: { input?: unknown }) => void starts.push(run.input),
+    };
+    const { server, classifier: c } = classifierOf(Redacting, [status(401)]);
+    await settled(
+      c.batch(
+        ["private a", "private b", "private c"],
+        { maxConcurrency: 1, callbacks: [handler] },
+        { returnExceptions } as any,
+      ),
+    );
+    await settle();
+    expect(starts).toEqual(["redacted", "redacted", "redacted"]);
+    expect(server.requests.map((r) => r.body.state)).toEqual(["redacted"]);
+  },
+);
+
+it("keeps sending after an override recovers from a failure", async () => {
+  const seed = await classifier([]).classifier.invoke("seed");
+  class Recovering extends NaceClassifier {
+    override async invoke(input: any, options?: any) {
+      try {
+        return await super.invoke(input, options);
+      } catch (error) {
+        if ((error as { status?: number }).status === 422) return seed;
+        throw error;
+      }
+    }
+  }
+  const { server, classifier: c } = classifierOf(Recovering, [status(422)]);
+  const out = await c.batch(["a", "b", "c"], { maxConcurrency: 1 });
+  expect(out).toHaveLength(3);
+  expect(out[0]).toBe(seed);
+  expect(out.some((r) => r instanceof Error)).toBe(false);
+  expect(server.requests.map((r) => r.body.state)).toEqual(["a", "b", "c"]);
+});
+
+it("rejects when an input is cancelled with a stopped error, instead of resolving with errors", async () => {
+  const reason = new NaceBatchStoppedError("cancelled by the caller");
+  const { classifier: c } = classifier([]);
+  const result: any = await settled(
+    c.batch(["a", "b"], [{ maxConcurrency: 1, signal: AbortSignal.abort(reason) }, {}]),
+  );
+  expect(result.value).toBeUndefined();
+  expect(result.error).toBe(reason);
+});
+
+it.each([
+  ["call options", {}, { maxConcurrency: NaN }, undefined],
+  ["batch options", {}, undefined, { maxConcurrency: NaN }],
+  ["the constructor", { maxConcurrency: NaN }, undefined, undefined],
+] as const)(
+  "rejects a NaN maxConcurrency from %s like any Runnable",
+  async (_source, extra, callOptions, batchOptions) => {
+    const base: any = await settled(
+      RunnableLambda.from(async (x: string) => x).batch(["a", "b"], { maxConcurrency: NaN }),
+    );
+    expect(base.error).toBeInstanceOf(TypeError);
+    const starts: unknown[] = [];
+    const handler = { handleChainStart: (_chain: unknown, run: unknown) => void starts.push(run) };
+    const { server, classifier: c } = classifier([], extra);
+    const result: any = await settled(
+      c.batch(["a", "b"], { ...callOptions, callbacks: [handler] }, batchOptions),
+    );
+    expect(result.value).toBeUndefined();
+    expect(result.error).toBeInstanceOf(TypeError);
+    expect(result.error.message).toBe(base.error.message);
+    expect(server.requests).toHaveLength(0);
+    expect(starts).toHaveLength(0);
+  },
+);

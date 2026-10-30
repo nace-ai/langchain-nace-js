@@ -542,6 +542,32 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
     return attempts;
   }
 
+  /**
+   * What Drex would receive for these attempts, and a digest of it. Uses the actual wire
+   * input: it omits message artifacts and includes screenshot bytes. A locally unreadable
+   * image falls back to text only, as `ask` does. Throws when an attempt can't be prepared.
+   */
+  function prepareAttempts(attempts: DecisionAttempt[]): {
+    attempts: DecisionAttempt[];
+    inputKey: string;
+  } {
+    const prepared: ReturnType<NaceClassifier["prepare"]>[] = [];
+    for (const [index, attempt] of attempts.entries()) {
+      try {
+        prepared.push(classifier.prepare(attempt.state, { questions, images: attempt.images }));
+      } catch (error) {
+        if (!(NaceImageError.isInstance(error) && index + 1 < attempts.length)) throw error;
+      }
+    }
+    return {
+      attempts: prepared.map((input) => ({
+        state: input.state as State,
+        images: input.images.map((image) => (typeof image === "string" ? image : { ...image })),
+      })),
+      inputKey: createHash("sha256").update(JSON.stringify(prepared)).digest("hex"),
+    };
+  }
+
   /** Ask Drex, falling back to text only when screenshots are refused. Throws on failure. */
   async function ask(attempts: DecisionAttempt[], signal?: AbortSignal) {
     for (const [index, attempt] of attempts.entries()) {
@@ -613,6 +639,36 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
     return selected;
   }
 
+  /**
+   * `replay`, for a record the decision's task returned without running: the call's current
+   * input is captured only to compare it with the record's. A block saved for a failed check,
+   * or a record that can't be read, is replayed as it is, with no capture. If the current
+   * input can't be captured or prepared, the paused call can't be vouched for: it is blocked.
+   */
+  async function replayed(
+    gated: GatedToolCall,
+    record: unknown,
+    callId: string | null,
+    signal?: AbortSignal,
+  ): Promise<Selected> {
+    let inputKey: string | null = null;
+    if (
+      isGateRecord(record) &&
+      record.error === null &&
+      record.response !== null &&
+      record.callId === callId
+    ) {
+      try {
+        inputKey = prepareAttempts(await attemptsFor(gated)).inputKey;
+      } catch (error) {
+        // A cancelled run stays cancelled.
+        if (signal?.aborted) throw error;
+        return stop("the paused call's context could not be checked");
+      }
+    }
+    return replay(record, callId, inputKey);
+  }
+
   return createMiddleware({
     name: "NaceAutoModeMiddleware",
 
@@ -633,58 +689,52 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
       let fresh = false;
       try {
         signal?.throwIfAborted();
-        let attempts = await attemptsFor(gated);
-        let inputKey: string | null = null;
-        if (threadId != null) {
+        const callId = call.id ?? null;
+        // What `decide` did in this invocation. Empty when the task replayed a saved record.
+        const now: { ran: boolean; selected?: Selected } = { ran: false };
+        // Everything that depends on the call's input happens here, so that on a first run
+        // nothing runs before the task: capturing the screenshots, preparing what Drex is
+        // sent, asking, deciding. An error that ends the run (`onError: "throw"`, or a
+        // cancellation) is thrown out of the task, so the step fails and running it again
+        // captures and asks again. Nothing records it, so nothing shifts the task indices
+        // other middleware relies on. Only a failure that blocks the call is recorded, and
+        // replayed as that same block.
+        const decide = async (): Promise<GateRecord> => {
+          now.ran = true;
+          let inputKey: string | null = null;
           try {
-            // Use the actual wire input: it omits message artifacts and includes
-            // screenshot bytes. Reuse these snapshots for the request as well.
-            const prepared: ReturnType<NaceClassifier["prepare"]>[] = [];
-            for (const [index, attempt] of attempts.entries()) {
+            let attempts = await attemptsFor(gated);
+            if (threadId != null) {
               try {
-                prepared.push(
-                  classifier.prepare(attempt.state, { questions, images: attempt.images }),
-                );
-              } catch (error) {
-                // Locally unreadable images use the same text fallback as `ask`.
-                if (!(NaceImageError.isInstance(error) && index + 1 < attempts.length)) throw error;
+                ({ attempts, inputKey } = prepareAttempts(attempts));
+              } catch {
+                // Other preparation errors reach `ask`, which fails the same way and
+                // applies the configured error policy.
               }
             }
-            inputKey = createHash("sha256").update(JSON.stringify(prepared)).digest("hex");
-            attempts = prepared.map((input) => ({
-              state: input.state as State,
-              images: input.images.map((image) =>
-                typeof image === "string" ? image : { ...image },
-              ),
-            }));
-          } catch {
-            // Other preparation errors reach `ask`, which fails the same way and
-            // applies the configured error policy. Nothing is recorded.
-          }
-        }
-        const callId = call.id ?? null;
-        // Set by `decideNow` when it runs in this invocation (not on a replay).
-        const now: { selected?: Selected } = {};
-        const decideNow = async (): Promise<GateRecord> => {
-          const base = { v: GATE_RECORD_VERSION, callId, inputKey } as const;
-          try {
             const response = await ask(attempts, signal);
-            const selected = decisionFor(response);
-            now.selected = selected;
+            const decided = decisionFor(response);
+            now.selected = decided;
             return {
-              ...base,
+              v: GATE_RECORD_VERSION,
+              callId,
+              inputKey,
               response: JSON.stringify(response.raw),
               requestId: response.requestId ?? null,
-              decision: decisionKind(selected.decision) ?? "custom",
+              decision: decisionKind(decided.decision) ?? "custom",
               error: null,
             };
           } catch (error) {
-            // An error that ends the run (`onError: "throw"`, or a cancellation) is thrown, so
-            // the task fails and the run fails with it; running again asks Drex again. Nothing
-            // records it, so nothing shifts the task indices other middleware relies on. Only a
-            // failure that blocks the call is recorded, and replayed as that same block.
             const { name } = failed(error, signal);
-            return { ...base, response: null, requestId: null, decision: "block", error: name };
+            return {
+              v: GATE_RECORD_VERSION,
+              callId,
+              inputKey,
+              response: null,
+              requestId: null,
+              decision: "block",
+              error: name,
+            };
           }
         };
         // A task's result is kept in the agent's checkpoint, so a resume on any
@@ -693,24 +743,26 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
         const recorded = (): Promise<unknown> | undefined => {
           if (threadId == null) return undefined;
           try {
-            return task("NaceGateDecision", decideNow)() as Promise<unknown>;
+            return task("NaceGateDecision", decide)() as Promise<unknown>;
           } catch {
             return undefined; // Throws synchronously outside a LangGraph run.
           }
         };
-        const stored: unknown = await (recorded() ?? decideNow());
-        const decidedNow = now.selected as Selected | undefined;
-        if (decidedNow !== undefined) {
+        const stored: unknown = await (recorded() ?? decide());
+        if (now.selected !== undefined) {
           fresh = true;
           // A decision made now has no answer of its own. One that is already waiting for the
           // next `interrupt()` was given for something else (an edited state, an earlier
           // checkpoint), so whatever Drex says now, the call is blocked.
           selected =
             answerWaiting() === true
-              ? stop(ANSWER_FOR_ANOTHER_DECISION, decidedNow.verdict)
-              : decidedNow;
+              ? stop(ANSWER_FOR_ANOTHER_DECISION, now.selected.verdict)
+              : now.selected;
+        } else if (now.ran) {
+          // The check failed just now and blocks the call: the record says so.
+          selected = replay(stored, callId, null);
         } else {
-          selected = replay(stored, callId, inputKey);
+          selected = await replayed(gated, stored, callId, signal);
         }
         signal?.throwIfAborted();
       } catch (error) {

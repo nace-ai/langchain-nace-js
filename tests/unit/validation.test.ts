@@ -9,9 +9,11 @@ import {
   BILLING_URL,
   type ClassificationResponse,
   NaceAPIResponseValidationError,
+  NaceBadRequestError,
   NaceClassifier,
   NaceError,
   NaceInsufficientCreditError,
+  NaceUnprocessableEntityError,
   naceConditionalEdge,
   OPENROUTER_CREDITS_URL,
 } from "../../src/index.js";
@@ -313,7 +315,7 @@ describe("error size", () => {
     expect(error.body.error.message).toHaveLength(5_000);
   });
 
-  it("clips an oversized request id too", async () => {
+  it("keeps the billing guidance when the request id is oversized", async () => {
     const body = JSON.stringify({ error: { message: "Insufficient funds" } });
     const error = await fail(
       answering(402, body, {
@@ -323,6 +325,111 @@ describe("error size", () => {
     );
     expect(error.message).toContain(`Add funds at ${BILLING_URL}`);
     expect(error.message.length).toBeLessThanOrEqual(MAX + 1 + GUIDANCE);
+  });
+});
+
+describe("what an error shows", () => {
+  const questions = { q: { type: "noul" as const, instructions: "?" } };
+  const respond = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+    (async () =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json", "x-request-id": "req_ok", ...headers },
+      })) as typeof globalThis.fetch;
+  const fail = (fetch: typeof globalThis.fetch, extra: Record<string, unknown> = {}) =>
+    new NaceClassifier(offline(fetch, { questions, maxRetries: 0, ...extra }))
+      .invoke("x")
+      .catch((e) => e);
+
+  it("never adds anything from the request to the message or the cause", async () => {
+    const body = { error: { type: "invalid_request_error", message: "Invalid request" } };
+    const error = await new NaceClassifier(
+      offline(respond(400, body), {
+        apiKey: "nace_sk_REQUEST-SECRET-KEY",
+        defaultHeaders: { "x-tenant": "REQUEST-SECRET-HEADER" },
+        questions: { q: { type: "noul", instructions: "REQUEST-SECRET-QUESTION" } },
+        maxRetries: 0,
+      }),
+    )
+      .invoke({ note: "REQUEST-SECRET-STATE" })
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(NaceBadRequestError);
+    expect(error.message).toContain("Invalid request");
+    expect(error.message).not.toContain("REQUEST-SECRET");
+    expect(String(error.cause?.message)).not.toContain("REQUEST-SECRET");
+    expect(inspect(error, { depth: 5 })).not.toContain("REQUEST-SECRET");
+    expect(JSON.stringify(error)).not.toContain("REQUEST-SECRET");
+  });
+
+  const hugeIssue = `${"f".repeat(1_000)}ISSUE-SECRET${"g".repeat(99_000)}`;
+  const providers: [string, Record<string, unknown>, unknown, RegExp][] = [
+    [
+      "Nace",
+      {},
+      {
+        error: {
+          type: "invalid_request_error",
+          message: "Invalid request",
+          issues: [{ path: "questions.q", message: hugeIssue }],
+        },
+      },
+      /^Drex returned 422: Invalid request\n {2}questions\.q: f{100}/,
+    ],
+    [
+      "OpenRouter",
+      { baseUrl: "https://openrouter.ai/api/v1", apiKey: "sk-or-test" },
+      {
+        error: {
+          code: 422,
+          message: `HTTP 422: ${JSON.stringify({ detail: [{ loc: ["body", "questions", "q"], msg: hugeIssue }] })}`,
+        },
+      },
+      /^OpenRouter returned 422: the request is invalid\n {2}questions\.q: f{100}/,
+    ],
+  ];
+
+  it.each(providers)(
+    "keeps a long validation issue out of logs (%s)",
+    async (_name, extra, body, format) => {
+      const error = await fail(respond(422, body), extra);
+      expect(error).toBeInstanceOf(NaceUnprocessableEntityError);
+      expect(error.message).toMatch(format);
+      expect(error.message).not.toContain("ISSUE-SECRET");
+      const shown = inspect(error, { depth: 5 });
+      expect(shown.length).toBeLessThan(5_000);
+      expect(shown).not.toContain("ISSUE-SECRET");
+      expect(JSON.stringify(error)).not.toContain("ISSUE-SECRET");
+      expect(Object.keys(error)).not.toContain("issues");
+      expect(error.issues).toHaveLength(1);
+      expect(error.issues[0].path).toBe("questions.q");
+      expect(error.issues[0].message).toBe(hugeIssue);
+    },
+  );
+
+  it("bounds the error type and drops a request id that is not an id", async () => {
+    const body = { error: { type: `${"t".repeat(5_000)}TYPE-SECRET`, message: "bad" } };
+    const error = await fail(
+      respond(400, body, { "x-request-id": "not an id: <b>RID-SECRET</b>" }),
+    );
+    expect(error.type).toHaveLength(64);
+    expect(error.type).toMatch(/^t{63}…$/);
+    expect(error.requestId).toBeUndefined();
+    expect(error.message).not.toContain("request_id");
+    const shown = inspect(error, { depth: 5 });
+    expect(shown).not.toContain("TYPE-SECRET");
+    expect(shown).not.toContain("RID-SECRET");
+    expect(JSON.stringify(error)).not.toContain("SECRET");
+    expect(error.body.error.type).toContain("TYPE-SECRET");
+  });
+
+  it("keeps a request id of 128 allowed characters and drops 129", async () => {
+    const body = { error: { message: "bad" } };
+    const kept = await fail(respond(400, body, { "x-request-id": `a.B_9:-${"c".repeat(121)}` }));
+    expect(kept.requestId).toHaveLength(128);
+    expect(kept.message).toContain(`(request_id=${kept.requestId})`);
+    const dropped = await fail(respond(400, body, { "x-request-id": "c".repeat(129) }));
+    expect(dropped.requestId).toBeUndefined();
+    expect(dropped.message).not.toContain("request_id");
   });
 });
 

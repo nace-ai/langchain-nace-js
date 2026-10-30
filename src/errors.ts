@@ -77,8 +77,11 @@ export class NaceAPIError extends ns.brand(NaceError, "api") {
   /** The class of failure Drex reports, such as `invalid_request_error`. */
   readonly type: string | undefined;
 
-  /** Where the request failed validation. */
-  issues: Issue[];
+  /**
+   * Where the request failed validation, with each issue's full text. Non-enumerable
+   * like `body`: an issue's text comes from the response and can be long.
+   */
+  declare readonly issues: Issue[];
 
   /** The response body. Non-enumerable, so it never reaches logs by accident. */
   declare readonly body: unknown;
@@ -102,7 +105,7 @@ export class NaceAPIError extends ns.brand(NaceError, "api") {
     this.status = fields.status;
     this.requestId = fields.requestId;
     this.type = fields.type;
-    this.issues = fields.issues ?? [];
+    defineHidden(this, "issues", fields.issues ?? []);
     defineHidden(this, "body", fields.body);
     defineHidden(this, "headers", fields.headers);
   }
@@ -273,6 +276,10 @@ function bodyIssues(body: unknown): Issue[] {
 const MAX_MESSAGE_CHARS = 500;
 /** The billing link and the request id, which are kept, are cut to this many. */
 const MAX_GUIDANCE_CHARS = 350;
+/** The server's error `type` is cut to this many characters. */
+const MAX_TYPE_CHARS = 64;
+/** A request id is a short token; anything else in that header is dropped. */
+const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 export function clip(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -281,6 +288,14 @@ export function clip(text: string, max: number): string {
   const last = text.charCodeAt(end - 1);
   if (last >= 0xd800 && last <= 0xdbff) end -= 1;
   return `${text.slice(0, end)}…`;
+}
+
+function boundedType(type: string | undefined): string | undefined {
+  return type === undefined ? undefined : clip(type, MAX_TYPE_CHARS);
+}
+
+function validRequestId(requestId: string | undefined): string | undefined {
+  return requestId !== undefined && REQUEST_ID.test(requestId) ? requestId : undefined;
 }
 
 /**
@@ -355,11 +370,13 @@ export function convertError(error: unknown, provider = "Drex"): unknown {
       message = unwrapped.message;
       if (issues.length === 0) issues = unwrapped.issues;
     }
-    const { message: text, summary } = describe(provider, status, message, issues, error.requestId);
+    // The request id and the type come from the response and show up in logs.
+    const requestId = validRequestId(error.requestId);
+    const { message: text, summary } = describe(provider, status, message, issues, requestId);
     const converted = new Class(text, {
       status,
-      requestId: error.requestId,
-      type: error.type,
+      requestId,
+      type: boundedType(error.type),
       issues,
       body: error.body,
       headers: error.headers,

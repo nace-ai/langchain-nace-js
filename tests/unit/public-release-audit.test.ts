@@ -218,13 +218,14 @@ it("checks threaded calls when prior tool messages contain bigint artifacts", as
 });
 
 it.each([
-  { changed: false, nextRisk: 4 },
-  { changed: true, nextRisk: 4 },
-  { changed: true, nextRisk: 2 },
-])("binds pending approval to its screenshot: %j", async ({ changed, nextRisk }) => {
+  { changed: false, nextRisk: 4, invalid: false },
+  { changed: true, nextRisk: 4, invalid: false },
+  { changed: true, nextRisk: 2, invalid: false },
+  { changed: true, nextRisk: 2, invalid: true },
+])("binds pending approval to its screenshot: %j", async ({ changed, nextRisk, invalid }) => {
   const drex = fakeDrex([answer(2, 1, 1), answer(nextRisk, 1, 1)]);
   let ran = false;
-  let screenshot = readFileSync(new URL("../fixtures/red.png", import.meta.url));
+  let screenshot: Buffer | string = readFileSync(new URL("../fixtures/red.png", import.meta.url));
   const send = tool(
     async () => {
       ran = true;
@@ -253,7 +254,11 @@ it.each([
   const config = { configurable: { thread_id: `screen-${changed}` } };
   const paused = await agent.invoke({ messages: [new HumanMessage("Send the report")] }, config);
   expect((paused as any).__interrupt__).toHaveLength(1);
-  if (changed) screenshot = readFileSync(new URL("../fixtures/blue.png", import.meta.url));
+  if (changed) {
+    screenshot = invalid
+      ? "https://example.com/screenshot.png"
+      : readFileSync(new URL("../fixtures/blue.png", import.meta.url));
+  }
   await agent.invoke(new Command({ resume: { type: "approve" } }), config);
   expect(ran).toBe(!changed);
   expect(drex.requests).toHaveLength(changed ? 2 : 1);

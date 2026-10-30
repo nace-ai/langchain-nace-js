@@ -530,8 +530,13 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
       let selected: { decision: GateDecision; verdict?: GateVerdict };
       try {
         runtime?.signal?.throwIfAborted();
-        let attempts = await attemptsFor(gated);
         if (threadId != null && call.id) {
+          key = createHash("sha256")
+            .update(JSON.stringify([String(threadId), call.id]))
+            .digest("hex");
+        }
+        let attempts = await attemptsFor(gated);
+        if (key !== undefined) {
           try {
             // Use the actual wire input: it omits message artifacts and includes
             // screenshot bytes. Reuse these snapshots for the request as well.
@@ -541,9 +546,6 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
                 images: attempt.images,
               }),
             );
-            key = createHash("sha256")
-              .update(JSON.stringify([String(threadId), call.id]))
-              .digest("hex");
             inputKey = createHash("sha256").update(JSON.stringify(prepared)).digest("hex");
             attempts = prepared.map((input) => ({
               state: input.state as State,
@@ -554,6 +556,7 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
           } catch {
             // An invalid image may still permit the text-only fallback. Skip
             // caching and let decide apply that retry and the configured error policy.
+            // Retain the call key so an existing approval cannot cover unknown input.
           }
         }
         const pending = cache.get(key);

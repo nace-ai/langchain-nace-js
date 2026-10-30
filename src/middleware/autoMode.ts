@@ -96,15 +96,30 @@ export function verdictSummary(verdict: GateVerdict): {
   };
 }
 
-/** Read the three default answers out of a response. */
-export function verdictFromResponse(response: ClassificationResponse): GateVerdict {
+/**
+ * Read the three default answers out of a response.
+ *
+ * Pass `riskLevels`, the number of levels in the rubric that was asked, to refuse
+ * a risk answer whose legend has a different length: the score is scaled by the
+ * legend, so a longer one would make a severe call look harmless.
+ */
+export function verdictFromResponse(
+  response: ClassificationResponse,
+  riskLevels?: number,
+): GateVerdict {
   const risk = response.scores.risk;
   const destructive = response.nouls.destructive;
   const matches = response.nouls.matches_request;
   if (risk === undefined || destructive === undefined || matches === undefined) {
     throw new NaceError("Drex's answer is missing one of the gate's questions.");
   }
-  const top = Math.max(Object.keys(risk.legend).length - 1, 1);
+  const levels = Object.keys(risk.legend).length;
+  if (riskLevels !== undefined && levels !== riskLevels) {
+    throw new NaceError(
+      `Drex's risk answer has ${levels} levels, but the rubric asked has ${riskLevels}.`,
+    );
+  }
+  const top = Math.max(levels - 1, 1);
   return {
     risk: risk.score / top,
     pDestructive: destructive.noul,
@@ -478,6 +493,8 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
     matches_request: config.questions?.matchesRequest ?? DEFAULT_MATCHES_REQUEST,
     ...config.questions?.extra,
   };
+  const riskCriteria = (questions.risk as Score).criteria;
+  const riskLevels = Array.isArray(riskCriteria) ? riskCriteria.length : undefined;
   const typeSafeRisk = config.instructions !== undefined || config.criteria != null;
   if (typeSafeRisk) {
     const question: Noul = { type: "noul" };
@@ -594,7 +611,7 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
 
   /** Turn Drex's answers into a decision. Deterministic for a given response. */
   function decisionFor(response: ClassificationResponse): Selected {
-    const verdict = verdictFromResponse(response);
+    const verdict = verdictFromResponse(response, riskLevels);
     const typeSafe = response.nouls[TYPESAFE_RISK_ID];
     if (typeSafeRisk && (typeSafe === undefined || typeSafe.noul >= TYPESAFE_THRESHOLD)) {
       return { decision: new Block("it was classified as risky"), verdict };

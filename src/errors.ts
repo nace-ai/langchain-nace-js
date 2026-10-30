@@ -13,6 +13,9 @@ const ns = baseNs.sub("nace");
 
 export const BILLING_URL = "https://console.nace.ai/dashboard/billing";
 
+/** Where an OpenRouter user adds credits, for a 402 from that backend. */
+export const OPENROUTER_CREDITS_URL = "https://openrouter.ai/settings/credits";
+
 /** A `{ path, message }` validation issue from Drex. */
 export interface Issue {
   path: string;
@@ -74,8 +77,11 @@ export class NaceAPIError extends ns.brand(NaceError, "api") {
   /** The class of failure Drex reports, such as `invalid_request_error`. */
   readonly type: string | undefined;
 
-  /** Where the request failed validation. */
-  issues: Issue[];
+  /**
+   * Where the request failed validation, with each issue's full text. Non-enumerable
+   * like `body`: an issue's text comes from the response and can be long.
+   */
+  declare readonly issues: Issue[];
 
   /** The response body. Non-enumerable, so it never reaches logs by accident. */
   declare readonly body: unknown;
@@ -99,7 +105,7 @@ export class NaceAPIError extends ns.brand(NaceError, "api") {
     this.status = fields.status;
     this.requestId = fields.requestId;
     this.type = fields.type;
-    this.issues = fields.issues ?? [];
+    defineHidden(this, "issues", fields.issues ?? []);
     defineHidden(this, "body", fields.body);
     defineHidden(this, "headers", fields.headers);
   }
@@ -266,24 +272,69 @@ function bodyIssues(body: unknown): Issue[] {
   return issuesFrom(body.detail);
 }
 
+/** A message is cut to this many characters, so an odd body can't flood logs. */
+const MAX_MESSAGE_CHARS = 500;
+/** The billing link and the request id, which are kept, are cut to this many. */
+const MAX_GUIDANCE_CHARS = 350;
+/** The server's error `type` is cut to this many characters. */
+const MAX_TYPE_CHARS = 64;
+/** A request id is a short token; anything else in that header is dropped. */
+const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+
+export function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let end = max - 1;
+  // Don't leave half of a surrogate pair at the cut.
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${text.slice(0, end)}…`;
+}
+
+function boundedType(type: string | undefined): string | undefined {
+  return type === undefined ? undefined : clip(type, MAX_TYPE_CHARS);
+}
+
+function validRequestId(requestId: string | undefined): string | undefined {
+  return requestId !== undefined && REQUEST_ID.test(requestId) ? requestId : undefined;
+}
+
+/**
+ * The error's message, and the clipped text before the guidance is added, which
+ * is all that `cause` keeps of the SDK's error.
+ */
 function describe(
   provider: string,
   status: number,
   message: string | undefined,
   issues: Issue[],
   requestId: string | undefined,
-): string {
-  let text = `${provider} returned ${status}`;
-  if (message) text += `: ${message}`;
+): { message: string; summary: string } {
+  // Gateways and proxies answer some failures with a whole HTML page.
+  const html = message !== undefined && /^\s*<(?:!doctype|html)/i.test(message);
+  let text = html
+    ? `${provider} returned an HTML error page (HTTP ${status})`
+    : `${provider} returned ${status}${message ? `: ${message}` : ""}`;
   const lines = issues.map((issue) => `${issue.path || "(request)"}: ${issue.message}`);
   // Drex's top-level message often repeats its only issue; don't print it twice.
   const repeated = issues.length === 1 && issues[0]?.message === message;
   if (lines.length > 0 && !repeated && !(lines.length === 1 && lines[0] === message)) {
     text += `\n${lines.map((line) => `  ${line}`).join("\n")}`;
   }
-  if (status === 402) text += `\nAdd funds at ${BILLING_URL}`;
-  if (requestId) text += `\n(request_id=${requestId})`;
-  return text;
+  // The full body and every issue stay on the error; the message is the short form.
+  text = clip(text, MAX_MESSAGE_CHARS);
+  const summary = text;
+  // Guidance is added after clipping, so a long body can't push it out.
+  const guidance: string[] = [];
+  if (status === 402) {
+    guidance.push(
+      provider === "OpenRouter"
+        ? `Add credits at ${OPENROUTER_CREDITS_URL}`
+        : `Add funds at ${BILLING_URL}`,
+    );
+  }
+  if (requestId) guidance.push(`(request_id=${requestId})`);
+  if (guidance.length > 0) text += `\n${clip(guidance.join("\n"), MAX_GUIDANCE_CHARS)}`;
+  return { message: text, summary };
 }
 
 /**
@@ -319,14 +370,19 @@ export function convertError(error: unknown, provider = "Drex"): unknown {
       message = unwrapped.message;
       if (issues.length === 0) issues = unwrapped.issues;
     }
-    const converted = new Class(describe(provider, status, message, issues, error.requestId), {
+    // The request id and the type come from the response and show up in logs.
+    const requestId = validRequestId(error.requestId);
+    const { message: text, summary } = describe(provider, status, message, issues, requestId);
+    const converted = new Class(text, {
       status,
-      requestId: error.requestId,
-      type: error.type,
+      requestId,
+      type: boundedType(error.type),
       issues,
       body: error.body,
       headers: error.headers,
-      cause: error,
+      // Not the SDK's error: printing an error prints its cause, and that one holds
+      // the whole response body and headers. The complete body stays on `body`.
+      cause: new Error(summary),
     });
     if (converted instanceof NaceRateLimitError && error instanceof sdk.RateLimitError) {
       converted.retryAfterMs = error.retryAfterMs;

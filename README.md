@@ -294,7 +294,7 @@ Malformed probabilities, confidence values or score rubrics raise `NaceAPIRespon
 
 ## Errors
 
-Every error extends LangChain's `LangChainError`. Check errors with `.isInstance()`, which keeps working when two copies of the package are installed. Messages never include your state.
+Every error extends LangChain's `LangChainError`. Check errors with `.isInstance()`, which keeps working when two copies of the package are installed. This package never adds your state, questions or keys to an error message. A message does include text from the provider's error response (for a 422, each issue's `path: message`), clipped to 500 characters, so if a provider repeats part of your request in its error, that text is in the message. The full response stays on `error.body` and every issue on `error.issues`; both are non-enumerable, so `console.log(error)` and `JSON.stringify(error)` don't print them. `error.type` is cut to 64 characters, and `error.requestId` is kept only when it is a short token.
 
 | Error                                                     | When                                                 |
 | --------------------------------------------------------- | ---------------------------------------------------- |

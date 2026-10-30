@@ -6,7 +6,7 @@
  */
 import * as z from "zod/v4";
 
-import { NaceAPIResponseValidationError, NaceError } from "./errors.js";
+import { clip, NaceAPIResponseValidationError, NaceError } from "./errors.js";
 
 /** Any value expressible in JSON. */
 export type JsonValue =
@@ -376,8 +376,68 @@ function pick<T extends Answer>(answers: Record<string, Answer | RawAnswer>, typ
   return out;
 }
 
-/** Build a response from a Drex response body, keeping unknown answer types. */
-export function parseResponse(body: unknown, requestId?: string): ClassificationResponse {
+/** A question id for a message: quoted, escaped, and cut to 64 characters. */
+function quoted(id: string): string {
+  return JSON.stringify(clip(id, 65));
+}
+
+/**
+ * Check that the answers fit the questions that were asked. Extra answer ids and
+ * answers to question types this package doesn't know are left alone.
+ *
+ * Messages name the question and the question's own type, never text the response
+ * supplied (an answer's type, a choice, a legend), so a bad response can't push its
+ * content into logs.
+ */
+function checkAnswered(
+  answers: Record<string, Answer | RawAnswer>,
+  asked: Record<string, Record<string, unknown>>,
+): void {
+  for (const [id, question] of Object.entries(asked)) {
+    const name = quoted(id);
+    if (!Object.hasOwn(answers, id)) {
+      throw new NaceAPIResponseValidationError(`Drex returned no answer for question ${name}.`);
+    }
+    const answer = answers[id] as Answer | RawAnswer;
+    const type = question.type;
+    if (type !== "noul" && type !== "choice" && type !== "score") continue;
+    if (answer.type !== type) {
+      throw new NaceAPIResponseValidationError(
+        `Drex's answer to question ${name} has the wrong type (expected ${type}).`,
+      );
+    }
+    const criteria = question.criteria;
+    if (type === "choice" && isRecord(criteria)) {
+      if (!Object.hasOwn(criteria, (answer as ChoiceAnswer).choice)) {
+        throw new NaceAPIResponseValidationError(
+          `Drex answered question ${name} with a choice that was not offered.`,
+        );
+      }
+    }
+    if (type === "score" && Array.isArray(criteria)) {
+      const levels = Object.keys((answer as ScoreAnswer).legend).length;
+      if (levels !== criteria.length) {
+        throw new NaceAPIResponseValidationError(
+          `Drex answered question ${name} with a score legend of ${levels} levels, ` +
+            `but the rubric has ${criteria.length}.`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Build a response from a Drex response body, keeping unknown answer types.
+ *
+ * With `asked` (the questions as sent), every asked question must have an answer
+ * of its own type, a choice must be one of the labels offered, and a score's
+ * legend must be as long as the rubric asked.
+ */
+export function parseResponse(
+  body: unknown,
+  requestId?: string,
+  asked?: Record<string, Record<string, unknown>>,
+): ClassificationResponse {
   if (!isRecord(body)) {
     throw new NaceAPIResponseValidationError("Drex returned a body that isn't a JSON object.");
   }
@@ -386,6 +446,7 @@ export function parseResponse(body: unknown, requestId?: string): Classification
   for (const [id, raw] of Object.entries(rawAnswers)) {
     setOwn(answers, id, parseAnswer(raw));
   }
+  if (asked !== undefined) checkAnswered(answers, asked);
   const rawUsage = isRecord(body.usage) ? body.usage : {};
   const usage: Usage = {};
   if (typeof rawUsage.input_tokens === "number") usage.inputTokens = rawUsage.input_tokens;

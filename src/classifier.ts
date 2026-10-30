@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import {
   Runnable,
   type RunnableBatchOptions,
@@ -327,26 +329,10 @@ export class NaceClassifier extends Runnable<
     input: State,
     options?: Partial<NaceClassifierCallOptions>,
   ): Promise<ClassificationResponse> {
-    return this.runCall(input, options);
-  }
-
-  /**
-   * One traced request. When `batch` dispatched it, the call options carry the
-   * batch's hooks under a private key: `beforeSend` runs right before the request
-   * is sent and can refuse it, `onFailure` sees a failed request's error before the
-   * run's error callbacks do.
-   */
-  private runCall(
-    input: State,
-    options?: Partial<NaceClassifierCallOptions>,
-  ): Promise<ClassificationResponse> {
-    // The batch's hooks are taken off the options here, so the private key never
-    // reaches the run's config, the callbacks' metadata or the request.
-    const { [DISPATCH_HOOKS]: hooks, ...callOptions } = (options ?? {}) as BatchCallOptions;
     const config = {
-      ...callOptions,
+      ...options,
       metadata: {
-        ...callOptions.metadata,
+        ...options?.metadata,
         ls_provider: "nace",
         ls_model_name: this.model,
         ls_model_type: "chat",
@@ -354,16 +340,8 @@ export class NaceClassifier extends Runnable<
     };
     // The config `_callWithConfig` hands over carries the run's signal, which also
     // covers `timeout` and a cancelled parent run.
-    const run = async (state: State, runConfig?: { signal?: AbortSignal }) => {
-      const signal = runConfig?.signal ?? callOptions.signal;
-      try {
-        hooks?.beforeSend(signal);
-        return await this.classify(state, { ...callOptions, signal });
-      } catch (error) {
-        hooks?.onFailure(error);
-        throw error;
-      }
-    };
+    const run = (state: State, runConfig?: { signal?: AbortSignal }) =>
+      this.classify(state, { ...options, signal: runConfig?.signal ?? options?.signal });
     return this._callWithConfig(run, input, {
       ...config,
       runType: "llm",
@@ -371,13 +349,16 @@ export class NaceClassifier extends Runnable<
   }
 
   /**
-   * Answer many requests, each through `invoke` (so an overridden `invoke` applies);
-   * at most `maxConcurrency` (default 8) at a time, in input order. After a failure
-   * that rejects the batch, or after a 401, 402 or 403 with `returnExceptions: true`,
-   * no new input is sent: requests already sent finish, including the SDK's own
-   * retries of them, and their results are discarded when the batch rejects. Inputs
-   * that were not sent get a `NaceBatchStoppedError` (and a run in your callbacks).
-   * A cancelled input fails alone.
+   * Answer many requests with LangChain's own `batch`: each input goes through
+   * `invoke` (so an overridden `invoke` applies), at most `maxConcurrency` (default
+   * 8) at a time, in input order. After a 401, 402 or 403, or once the batch has
+   * rejected, no new request is sent: requests already sent finish, including the
+   * SDK's own retries of them, and their results are discarded when the batch
+   * rejects. An input that was not sent fails with a `NaceBatchStoppedError` in its
+   * own run. A 401, 402 or 403 stops dispatch at once; after any other failure the
+   * batch stops when it rejects, so an input dispatched in between (for example while
+   * the failed input's error callbacks run) can still be sent. A cancelled input
+   * fails alone.
    */
   override async batch(
     inputs: State[],
@@ -396,76 +377,24 @@ export class NaceClassifier extends Runnable<
     options?: Partial<NaceClassifierCallOptions> | Partial<NaceClassifierCallOptions>[],
     batchOptions?: RunnableBatchOptions,
   ): Promise<(ClassificationResponse | Error)[]> {
-    const configs = this._getOptionsList(options ?? {}, inputs.length);
-    const limit = Math.max(
-      1,
-      configs[0]?.maxConcurrency ?? batchOptions?.maxConcurrency ?? this.maxConcurrency,
+    const state: BatchState = { owner: this, stopped: false, stops: new WeakSet() };
+    // Everything below runs in this batch's context, which `classify` reads right
+    // before it sends: the stop reaches it whatever an overridden `invoke` does with
+    // the options, and every input keeps its own run.
+    return batchContext.run(state, () =>
+      super
+        .batch(inputs, options, {
+          ...batchOptions,
+          maxConcurrency: batchOptions?.maxConcurrency ?? this.maxConcurrency,
+        })
+        .catch((error: unknown) => {
+          // Another input's stop may reject first; report the failure behind it.
+          const reason = state.stops.has(error as object) ? state.cause : error;
+          state.stopped = true;
+          state.cause ??= reason;
+          throw reason;
+        }),
     );
-    const returnExceptions = batchOptions?.returnExceptions === true;
-    const results: (ClassificationResponse | Error)[] = new Array(inputs.length);
-    let next = 0;
-    let stopped: { error: unknown } | undefined;
-    const stoppedError = () =>
-      new NaceBatchStoppedError(
-        "Not sent: an earlier request in this batch failed, and this one would too.",
-        { cause: stopped?.error },
-      );
-    // Whether a failed input stops the batch: any failure when it rejects, otherwise
-    // only one every later request would repeat. A cancelled input fails alone.
-    const recordFailure = (error: unknown) => {
-      if (error instanceof NaceBatchStoppedError) return;
-      if (!returnExceptions || stopsBatch(error)) stopped ??= { error };
-    };
-    const hooks: DispatchHooks = {
-      // The last check before the request, so inputs whose start callbacks were
-      // still running when the batch stopped send nothing.
-      beforeSend: (signal) => {
-        if (stopped !== undefined) throw stoppedError();
-        // An input that was cancelled fails alone, and is not sent.
-        signal?.throwIfAborted();
-      },
-      // Decided before the error leaves the run, so before any error callback is awaited.
-      onFailure: recordFailure,
-    };
-    // A run with the same start and error events as a failed request, but no request.
-    const notSent = (index: number): Promise<unknown> =>
-      this._callWithConfig(
-        () => {
-          throw stoppedError();
-        },
-        inputs[index] as State,
-        { ...configs[index], runType: "llm" } as Partial<NaceClassifierCallOptions>,
-      );
-    let rejectBatch!: (error: unknown) => void;
-    const rejected = new Promise<never>((_, reject) => {
-      rejectBatch = reject;
-    });
-    // Never throws: a failure is recorded, so the workers go on to give every
-    // input that was not sent its run, whether or not the batch has rejected.
-    const worker = async (): Promise<void> => {
-      while (next < inputs.length) {
-        const index = next++;
-        const send = stopped === undefined;
-        try {
-          results[index] = (await (send
-            ? this.invoke(inputs[index] as State, dispatchOptions(configs[index], hooks))
-            : notSent(index))) as ClassificationResponse;
-        } catch (error) {
-          results[index] = error as Error;
-          // Failures that never reach the request's hook (a start callback that
-          // raises, a cancellation that returns before the transport does) stop
-          // the batch here, before it rejects or this worker takes another input.
-          if (send) recordFailure(error);
-          if (send && !returnExceptions && !(error instanceof NaceBatchStoppedError)) {
-            rejectBatch(error);
-          }
-        }
-      }
-    };
-    const done = Promise.all(Array.from({ length: Math.min(limit, inputs.length) }, worker));
-    // Without `returnExceptions`, reject at the first error; the workers finish in the background.
-    await (returnExceptions ? done : Promise.race([done, rejected]));
-    return results;
   }
 
   /** The request body fields for one call, before the SDK adds `model` defaults. */
@@ -526,6 +455,18 @@ export class NaceClassifier extends Runnable<
       questions: prepared.questions,
     };
     if (prepared.images.length > 0) request.images = prepared.images;
+    const batch = batchContext.getStore();
+    const current = batch?.owner === this ? batch : undefined;
+    if (current?.stopped) {
+      const stop = new NaceBatchStoppedError(
+        "Not sent: an earlier request in this batch failed, and this one would too.",
+        { cause: current.cause },
+      );
+      current.stops.add(stop);
+      throw stop;
+    }
+    // A cancelled input is not sent.
+    options?.signal?.throwIfAborted();
     try {
       const { data, requestId } = await this.client
         // The SDK's request type is narrower than what Drex accepts (structured
@@ -534,7 +475,13 @@ export class NaceClassifier extends Runnable<
         .withResponse();
       return parseResponse(data, requestId ?? undefined);
     } catch (error) {
-      throw convertError(error, this.provider);
+      const converted = convertError(error, this.provider);
+      // Recorded before the error leaves the request, so before any callback runs.
+      if (current && stopsBatch(converted)) {
+        current.stopped = true;
+        current.cause ??= converted;
+      }
+      throw converted;
     }
   }
 }
@@ -546,28 +493,18 @@ function stopsBatch(error: unknown): boolean {
   return NaceAPIError.isInstance(error) && BATCH_STOP_STATUSES.has(error.status);
 }
 
-/** What `batch` runs around each request. */
-interface DispatchHooks {
-  beforeSend(signal: AbortSignal | undefined): void;
-  onFailure(error: unknown): void;
+/** What `batch` shares with the requests it dispatches. */
+interface BatchState {
+  owner: NaceClassifier;
+  stopped: boolean;
+  /** The failure that stopped the batch. */
+  cause?: unknown;
+  /** The stop errors this batch raised, to tell them from its inputs' own failures. */
+  stops: WeakSet<object>;
 }
 
-/**
- * Carries a batch's hooks through `invoke`, so a subclass that overrides `invoke`
- * still sees every input. A symbol key is not in the public call options, survives
- * a spread of them, and is not copied into the run's config or callback metadata.
- */
-const DISPATCH_HOOKS: unique symbol = Symbol("langchain-nace.dispatchHooks");
-
-type BatchCallOptions = Partial<NaceClassifierCallOptions> & { [DISPATCH_HOOKS]?: DispatchHooks };
-
-/** A copy of one input's call options that carries the batch's hooks. */
-function dispatchOptions(
-  config: Partial<NaceClassifierCallOptions> | undefined,
-  hooks: DispatchHooks,
-): Partial<NaceClassifierCallOptions> {
-  return { ...config, [DISPATCH_HOOKS]: hooks } as BatchCallOptions;
-}
+/** The batch a request belongs to, if any; set by `batch`, read by `classify`. */
+const batchContext = new AsyncLocalStorage<BatchState>();
 
 /** OpenRouter takes images as `image_url` parts of a `state` content array. */
 function openRouterState(state: unknown, images: ImageInput[]): unknown[] {

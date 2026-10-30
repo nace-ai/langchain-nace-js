@@ -63,15 +63,18 @@ it("keeps sending after a per-input 422 with returnExceptions", async () => {
   expect(out.filter((r) => r instanceof Error)).toHaveLength(1);
 });
 
-it("rejects at the first error without starting queued inputs", async () => {
+it("rejects at the first error and sends nothing once the batch has rejected", async () => {
   const { server, classifier: c } = classifier([
     ok,
     status(422),
     ...Array.from({ length: 18 }, () => ok),
   ]);
   await expect(c.batch(inputs, { maxConcurrency: 2 })).rejects.toThrow("422");
+  // Two inputs in flight, plus the two that took the slots the first two freed.
+  const atRejection = server.requests.length;
+  expect(atRejection).toBeLessThanOrEqual(4);
   await settle();
-  expect(server.requests.length).toBeLessThanOrEqual(3);
+  expect(server.requests).toHaveLength(atRejection);
 });
 
 it("keeps input order and honours batchOptions.maxConcurrency", async () => {
@@ -183,8 +186,9 @@ it.each([false, true])(
       c.batch(many, { maxConcurrency: 2, callbacks: [handler] }, { returnExceptions } as any),
     );
     const result: any = await outcome;
-    expect(sentDuringCallback).toBe(2);
     await settle();
+    // Read inside the callback, 50 ms after the 401: nothing had been sent since.
+    expect(sentDuringCallback).toBe(2);
     expect(server.requests).toHaveLength(2);
     if (returnExceptions) {
       expect(result.value.filter((r: unknown) => r instanceof NaceBatchStoppedError)).toHaveLength(
@@ -279,7 +283,7 @@ it("stops sending when a start callback that raises rejects the batch", async ()
   expect(lenient.server.requests.map((r) => r.body.state)).toEqual(["b", "c"]);
 });
 
-it("stops sending when a cancelled request is still settling at the transport", async () => {
+it("stops sending once a cancellation has rejected the batch, while the request still settles", async () => {
   const controller = new AbortController();
   const release = deferred();
   const sent: unknown[] = [];
@@ -308,9 +312,12 @@ it("stops sending when a cancelled request is still settling at the transport", 
   controller.abort();
   const result: any = await outcome;
   expect(result.error).toBeDefined();
+  // "b" can take the slot "a" frees at the cancellation, before the batch has rejected.
+  const atRejection = sent.length;
   release.resolve();
   await settle();
-  expect(sent).toEqual(["a"]);
+  expect(sent).toHaveLength(atRejection);
+  expect(sent).not.toContain("c");
 });
 
 class Redacting extends NaceClassifier {

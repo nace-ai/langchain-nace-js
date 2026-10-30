@@ -10,6 +10,7 @@ import {
   NaceAPIResponseValidationError,
   NaceClassifier,
   NaceError,
+  naceConditionalEdge,
 } from "../../src/index.js";
 import { naceAutoModeMiddleware, verdictFromResponse } from "../../src/middleware/index.js";
 import { parseResponse } from "../../src/types.js";
@@ -165,5 +166,33 @@ describe("gate rubric", () => {
     const { ran, last } = await run(new Unchecked(offline(fakeDrex().fetch)));
     expect(ran).toEqual([]);
     expect(last).toMatch(/its risk could not be checked/);
+  });
+});
+
+describe("conditional edge", () => {
+  const question = choice({ billing: null, technical: null });
+  const edge = (label: string) => {
+    /** A classifier that skips response checking, so only the edge's own check is tested. */
+    class Unchecked extends NaceClassifier {
+      override async invoke(): Promise<ClassificationResponse> {
+        return parseResponse({ model: "drex-max", answers: { route: picked(label) } });
+      }
+    }
+    return naceConditionalEdge({
+      question,
+      state: (s: string) => s,
+      minConfidence: 0.5,
+      classifier: new Unchecked(offline(fakeDrex().fetch)),
+    });
+  };
+
+  it("returns an offered label", async () => {
+    await expect(edge("billing")("hi")).resolves.toBe("billing");
+  });
+
+  it("refuses a label that was not offered, such as the graph's end marker", async () => {
+    const error = await edge("__end__")("hi").catch((e) => e);
+    expect(error).toBeInstanceOf(NaceAPIResponseValidationError);
+    expect(error.message).not.toContain("__end__");
   });
 });

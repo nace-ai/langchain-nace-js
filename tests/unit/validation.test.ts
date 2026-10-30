@@ -16,7 +16,7 @@ import {
 } from "../../src/index.js";
 import { naceAutoModeMiddleware, verdictFromResponse } from "../../src/middleware/index.js";
 import { parseResponse } from "../../src/types.js";
-import { fakeDrex, offline, okBody, ScriptedChatModel } from "./helpers.js";
+import { fakeDrex, offline, okBody, PNG_1x1, ScriptedChatModel } from "./helpers.js";
 
 const choice = (criteria: Record<string, string | null>) => ({
   type: "choice" as const,
@@ -304,5 +304,39 @@ describe("402 guidance", () => {
       .catch((e) => e);
     expect(error.message).toContain(`Add funds at ${BILLING_URL}`);
     expect(error.message).not.toContain("openrouter.ai");
+  });
+});
+
+describe("modelKwargs", () => {
+  const q = { q: { type: "noul" as const, instructions: "?" } };
+
+  it.each(["model", "state", "questions", "images"])("refuses the reserved key %s", (key) => {
+    const server = fakeDrex();
+    expect(
+      () =>
+        new NaceClassifier(offline(server.fetch, { questions: q, modelKwargs: { [key]: "x" } })),
+    ).toThrow(new RegExp(`modelKwargs.*"${key}"`));
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("does not let modelKwargs.images reach a text-only model", () => {
+    expect(
+      () =>
+        new NaceClassifier(
+          offline(fakeDrex().fetch, {
+            model: "drex-v2.0",
+            questions: q,
+            modelKwargs: { images: [PNG_1x1] },
+          }),
+        ),
+    ).toThrow(NaceError);
+  });
+
+  it("still sends other fields", async () => {
+    const server = fakeDrex();
+    await new NaceClassifier(
+      offline(server.fetch, { questions: q, modelKwargs: { seed: 7 } }),
+    ).invoke("x");
+    expect(server.requests[0]?.body.seed).toBe(7);
   });
 });

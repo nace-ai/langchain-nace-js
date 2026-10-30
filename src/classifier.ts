@@ -26,6 +26,9 @@ export const DEFAULT_BASE_URL = "https://console.nace.ai";
 export const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_CONCURRENCY = 8;
 
+/** Request fields the classifier sets itself; `modelKwargs` can't override them. */
+const RESERVED_BODY_FIELDS = ["model", "state", "questions", "images"] as const;
+
 /**
  * Released, pinned versions known to read text only. Facts about pinned
  * versions never change; every other model id is sent as given and Drex decides.
@@ -229,6 +232,13 @@ export class NaceClassifier extends Runnable<
     }
     if (fields.maxRetries !== undefined && !(fields.maxRetries >= 0)) {
       throw new NaceError("`maxRetries` must be zero or more.");
+    }
+    for (const key of RESERVED_BODY_FIELDS) {
+      if (fields.modelKwargs !== undefined && Object.hasOwn(fields.modelKwargs, key)) {
+        throw new NaceError(
+          `\`modelKwargs\` can't set "${key}"; it is set from the model, state, questions and images.`,
+        );
+      }
     }
     this.questions =
       fields.questions === undefined ? undefined : validateQuestions(fields.questions);

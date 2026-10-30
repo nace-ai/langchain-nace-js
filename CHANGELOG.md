@@ -17,6 +17,7 @@
 - `naceConditionalEdge` refuses an answer that is not one of the question's labels, so a label such as `__end__` can no longer pick the next node.
 - Keep API error messages short: an HTML error page from a gateway becomes one line, other text is cut to 500 characters, and the billing link and request id are added after the cut. The full `body` and every issue stay on the error.
 - A 402 from OpenRouter points to OpenRouter's credits page (`OPENROUTER_CREDITS_URL`) instead of the Drex billing page.
+- Refuse `modelKwargs` that set `model`, `state`, `questions` or `images`: `images` used to reach a text-only model and skip its refusal.
 
 ## 0.1.0
 

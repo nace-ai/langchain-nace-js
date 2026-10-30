@@ -339,7 +339,8 @@ export interface NaceAutoModeMiddlewareConfig {
   /**
    * `true` sends the newest one or two inline images in the conversation (for
    * computer-use agents); a function returns the images for a call. Needs an
-   * image model such as `drex-max`. Default `false`.
+   * image model such as `drex-max`. Default `false`. A function must not call
+   * LangGraph `task()` or `interrupt()`: on a resume it runs again to compare screenshots.
    */
   screenshots?: boolean | ScreenshotSource;
   /**

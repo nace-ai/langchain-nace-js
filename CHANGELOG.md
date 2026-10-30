@@ -13,6 +13,7 @@
 - Match OpenRouter by exact hostname, including its DNS trailing-dot form.
 - Document upgrading from 0.1.0 and replacing credentials used with custom providers.
 - Refuse a response that doesn't answer the questions asked: a missing answer, an answer of another type, a choice that was not offered, or a score legend of a different length than the rubric. Extra answers and unknown question types are still accepted.
+- Read the tool gate's risk against the rubric that was asked: an answer with a legend of another length is blocked as unchecked, not scaled by its own legend (a 100-level legend turned "Severe" into 0.04 and allowed the call).
 
 ## 0.1.0
 

@@ -174,7 +174,7 @@ describe.skipIf(!KEY)("Drex contract", () => {
   });
 
   describe("limits and errors", () => {
-    it("refuses 17 questions on drex-max with a questions path, or answers all (Drex's limit)", async () => {
+    it("accepts more than 16 questions on drex-max", async () => {
       const questions: Questions = {};
       for (let i = 0; i < 17; i += 1) {
         questions[`q${i}`] = {
@@ -182,14 +182,8 @@ describe.skipIf(!KEY)("Drex contract", () => {
           instructions: `Does the text mention the number ${i}?`,
         };
       }
-      try {
-        const r = await live("drex-max", { questions }).invoke(TICKET);
-        expect(Object.keys(r.nouls)).toHaveLength(17);
-      } catch (error) {
-        expect(error).toBeInstanceOf(NaceUnprocessableEntityError);
-        const issues = (error as NaceUnprocessableEntityError).issues;
-        expect(issues.some((i) => i.path.startsWith("questions"))).toBe(true);
-      }
+      const r = await live("drex-max", { questions }).invoke(TICKET);
+      expect(Object.keys(r.nouls)).toHaveLength(17);
     });
 
     it("refuses images on drex-v2.0 before sending", async () => {

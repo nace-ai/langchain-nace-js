@@ -115,7 +115,7 @@ What behaves differently, on purpose:
 
 | Model                    | Reads                 | Questions per request |
 | ------------------------ | --------------------- | --------------------- |
-| **`drex-max`** (default) | text, JSON and images | up to 16              |
+| **`drex-max`** (default) | text, JSON and images | up to 512             |
 | `drex-v2.0`              | text and JSON         | up to 512             |
 
 Any other model id is sent as given (`drex-v1.5`, `drex-latest`, and models released later). Drex enforces each model's limits, and its errors say what to change. Pin a model with `model` or `NACE_DEFAULT_DECISION_MODEL`. The package default moves to the newest flagship with each Drex release, so pin one if you need results that never change.

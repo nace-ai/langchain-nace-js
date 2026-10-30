@@ -246,3 +246,102 @@ it("gives inputs that were never sent a run when the batch rejects", async () =>
     process.off("unhandledRejection", onUnhandled);
   }
 });
+
+it("stops sending when a start callback that raises rejects the batch", async () => {
+  const handler = {
+    awaitHandlers: true,
+    raiseError: true,
+    handleChainStart: async (_chain: unknown, run: { input?: unknown }) => {
+      if (run.input === "a") throw new Error("handler failed");
+    },
+  };
+  const strict = classifier([]);
+  await expect(
+    strict.classifier.batch(["a", "b", "c"], { maxConcurrency: 1, callbacks: [handler] }),
+  ).rejects.toThrow("handler failed");
+  await settle();
+  expect(strict.server.requests).toHaveLength(0);
+  // With returnExceptions, only a 401, 402 or 403 stops the batch; this failure stays with its input.
+  const lenient = classifier([]);
+  const out = await lenient.classifier.batch(
+    ["a", "b", "c"],
+    { maxConcurrency: 1, callbacks: [handler] },
+    { returnExceptions: true },
+  );
+  expect((out[0] as Error).message).toBe("handler failed");
+  expect(lenient.server.requests.map((r) => r.body.state)).toEqual(["b", "c"]);
+});
+
+it("stops sending when a cancelled request is still settling at the transport", async () => {
+  const controller = new AbortController();
+  const release = deferred();
+  const sent: unknown[] = [];
+  const server = fakeDrex([]);
+  // A transport that ignores the signal and reports the cancellation late.
+  const transport = (async (input: string | URL | Request, init?: RequestInit) => {
+    const state = JSON.parse(String(init?.body)).state;
+    sent.push(state);
+    if (state === "a") {
+      await release.promise;
+      throw new DOMException("aborted", "AbortError");
+    }
+    return server.fetch(input, init);
+  }) as typeof globalThis.fetch;
+  const c = new NaceClassifier({
+    apiKey: "nace_sk_test",
+    baseUrl: "https://drex.test",
+    fetch: transport,
+    questions,
+    maxRetries: 0,
+  });
+  const outcome = settled(
+    c.batch(["a", "b", "c"], [{ maxConcurrency: 1, signal: controller.signal }, {}, {}]),
+  );
+  while (sent.length === 0) await sleep(5);
+  controller.abort();
+  const result: any = await outcome;
+  expect(result.error).toBeDefined();
+  release.resolve();
+  await settle();
+  expect(sent).toEqual(["a"]);
+});
+
+class Redacting extends NaceClassifier {
+  override async invoke(_input: any, options?: any) {
+    return super.invoke("redacted", options);
+  }
+}
+
+it("sends what an overridden invoke sends, for batch as for invoke", async () => {
+  const server = fakeDrex([]);
+  const c = new Redacting({
+    apiKey: "nace_sk_test",
+    baseUrl: "https://drex.test",
+    fetch: server.fetch,
+    questions,
+    maxRetries: 0,
+  });
+  await c.invoke("private");
+  await c.batch(["private", "also private"], { maxConcurrency: 2 });
+  expect(server.requests.map((r) => r.body.state)).toEqual(["redacted", "redacted", "redacted"]);
+});
+
+it("keeps batch bookkeeping out of callback metadata", async () => {
+  const seen: Record<string, unknown>[] = [];
+  const handler = {
+    handleChainStart: (_c: unknown, _i: unknown, _r: unknown, _p: unknown, _t: unknown, m: any) =>
+      void seen.push(m),
+  };
+  const { classifier: c } = classifier([]);
+  await c.batch(["a", "b"], { callbacks: [handler], metadata: { mine: 1 } });
+  expect(seen).toHaveLength(2);
+  for (const metadata of seen) {
+    expect(Object.getOwnPropertySymbols(metadata)).toEqual([]);
+    expect(Object.keys(metadata).sort()).toEqual([
+      "ls_model_name",
+      "ls_model_type",
+      "ls_provider",
+      "mine",
+    ]);
+  }
+});

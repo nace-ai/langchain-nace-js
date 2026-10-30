@@ -46,10 +46,43 @@ function env(name: string): string | undefined {
 
 function isOpenRouter(baseUrl: string): boolean {
   try {
-    return new URL(baseUrl).hostname.endsWith("openrouter.ai");
+    return new URL(baseUrl).hostname.replace(/\.$/, "") === "openrouter.ai";
   } catch {
     return false;
   }
+}
+
+const NACE_HOSTS = new Set([
+  "console.nace.ai",
+  "console.test.nace.ai",
+  "console.stage.nace.ai",
+  "drex.nace.ai",
+  "drex.test.nace.ai",
+  "drex.stage.nace.ai",
+]);
+
+function isNaceDestination(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    return (
+      url.protocol === "https:" &&
+      url.port === "" &&
+      !url.username &&
+      !url.password &&
+      NACE_HOSTS.has(url.hostname.replace(/\.$/, ""))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function providerHeaders(baseUrl: string, headers?: HeadersInit): Headers {
+  const result = new Headers(headers);
+  if (!isNaceDestination(baseUrl)) {
+    result.delete("x-vercel-protection-bypass");
+    result.delete("x-vercel-set-bypass-cookie");
+  }
+  return result;
 }
 
 export interface NaceClassifierFields {
@@ -64,7 +97,7 @@ export interface NaceClassifierFields {
    * `drex-v2.0` for text-only batches of up to 512 questions.
    */
   model?: string;
-  /** `nace_sk_...` key. Defaults to `NACE_API_KEY`. */
+  /** Provider key. Defaults to `NACE_API_KEY` only on supported Nace HTTPS hosts. */
   apiKey?: string;
   /**
    * API root. Defaults to `NACE_BASE_URL`, else `https://console.nace.ai`.
@@ -145,7 +178,13 @@ export class NaceClassifier extends Runnable<
   lc_namespace = ["langchain", "classifiers", "nace"];
 
   get lc_secrets(): Record<string, string> {
-    return { apiKey: "NACE_API_KEY" };
+    return {
+      apiKey: isNaceDestination(this.baseUrl)
+        ? "NACE_API_KEY"
+        : isOpenRouter(this.baseUrl)
+          ? "OPENROUTER_API_KEY"
+          : "NACE_CUSTOM_API_KEY",
+    };
   }
 
   readonly questions: Questions | undefined;
@@ -172,9 +211,18 @@ export class NaceClassifier extends Runnable<
   constructor(fields: NaceClassifierFields = {}) {
     // `lc_kwargs` is enumerable; keep the key and the transport out of it.
     const { apiKey: _key, fetch: _fetch, ...kwargs } = fields;
-    super(kwargs);
+    let baseUrl = fields.baseUrl?.trim() || env("NACE_BASE_URL") || DEFAULT_BASE_URL;
+    while (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1);
+    const defaultHeaders = Object.fromEntries(providerHeaders(baseUrl, fields.defaultHeaders));
+    super({ ...kwargs, baseUrl, defaultHeaders });
 
-    const apiKey = fields.apiKey?.trim() || env("NACE_API_KEY");
+    if (fields.apiKey !== undefined && !fields.apiKey.trim()) {
+      throw new NaceError("`apiKey` must not be empty.");
+    }
+    if (fields.apiKey === undefined && !isNaceDestination(baseUrl)) {
+      throw new NaceError("A custom destination requires an explicit provider `apiKey`.");
+    }
+    const apiKey = fields.apiKey?.trim() ?? env("NACE_API_KEY");
     if (!apiKey) {
       throw new NaceError("A Drex API key is required. Pass `apiKey` or set `NACE_API_KEY`.");
     }
@@ -192,8 +240,6 @@ export class NaceClassifier extends Runnable<
       fields.questions === undefined ? undefined : validateQuestions(fields.questions);
     this.model = model;
 
-    let baseUrl = fields.baseUrl?.trim() || env("NACE_BASE_URL") || DEFAULT_BASE_URL;
-    while (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1);
     this.baseUrl = baseUrl;
     this.openrouter = fields.openrouter ?? isOpenRouter(baseUrl);
     this.timeout = fields.timeout ?? DEFAULT_TIMEOUT_MS;
@@ -208,7 +254,7 @@ export class NaceClassifier extends Runnable<
       configurable: true,
     });
 
-    const headers: Record<string, string> = { ...fields.defaultHeaders };
+    const headers: Record<string, string> = { ...defaultHeaders };
     if (this.openrouter) {
       headers["HTTP-Referer"] ??= "https://nace.ai";
       headers["X-OpenRouter-Title"] ??= "Drex for LangChain";
@@ -219,9 +265,11 @@ export class NaceClassifier extends Runnable<
     // nace-sdk sets `User-Agent: nace-sdk/<version>` after merging our headers,
     // so the attribution `User-Agent` is set here, on the way out.
     const withUserAgent = (input: string, init?: RequestInit) => {
-      const outgoing = new Headers(init?.headers);
+      const outgoing = providerHeaders(input, init?.headers);
       outgoing.set("User-Agent", CLIENT_NAME);
-      return inner(input, { ...init, headers: outgoing });
+      // Do not let fetch forward provider-specific headers through a redirect.
+      // Use the final API URL explicitly instead.
+      return inner(input, { ...init, headers: outgoing, redirect: "error" });
     };
 
     let client: NaceClient;

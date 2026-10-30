@@ -234,6 +234,33 @@ The router picks the model once per run. Below `minConfidence` (default 0.6), or
 
 Every request sends `User-Agent` and `X-Nace-Client: langchain-nace-js/<version>`. On OpenRouter it also sends `HTTP-Referer` and `X-OpenRouter-Title`.
 
+### Credentials and custom providers
+
+`NACE_API_KEY` is read automatically only for HTTPS on port 443 at
+`console.nace.ai`, `console.test.nace.ai`, `console.stage.nace.ai`, and their
+legacy `drex` equivalents. Other hosts, including localhost, require an explicit
+provider key. A blank explicit key is refused.
+
+```ts
+const classifier = new NaceClassifier({
+  baseUrl: "https://openrouter.ai/api/v1",
+  apiKey: process.env.OPENROUTER_API_KEY,
+});
+```
+
+Pass the same settings through `classifierOptions` when constructing a router.
+Vercel bypass headers are stripped for custom destinations. Requests refuse HTTP
+redirects; configure the final API URL directly. Serialized classifiers keep the
+resolved destination and use `OPENROUTER_API_KEY` for OpenRouter or
+`NACE_CUSTOM_API_KEY` for other custom hosts.
+
+**Upgrading from 0.1.0:** that version could send `NACE_API_KEY` to a custom
+provider when no explicit `apiKey` was supplied. Upgrade to 0.1.1 or later.
+If you used that configuration with real credentials, replace and revoke them;
+an upgrade cannot remove copies already received by another provider. Recreate
+and serialize custom-provider classifiers again: older saved manifests can
+still refer to `NACE_API_KEY`, even after upgrading.
+
 ## Errors
 
 Every error extends LangChain's `LangChainError`. Check errors with `.isInstance()`, which keeps working when two copies of the package are installed. Messages never include your state.

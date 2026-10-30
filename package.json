@@ -1,6 +1,6 @@
 {
   "name": "langchain-nace",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "LangChain.js integration for Drex decision models by Nace: a classifier, a router, and agent middleware for model routing and tool gating.",
   "license": "MIT",
   "author": "Nace",

@@ -323,11 +323,11 @@ describe("response", () => {
 describe("configuration", () => {
   it("reads NACE_API_KEY, NACE_BASE_URL and NACE_DEFAULT_DECISION_MODEL", async () => {
     vi.stubEnv("NACE_API_KEY", "nace_sk_env");
-    vi.stubEnv("NACE_BASE_URL", "https://env.test/");
+    vi.stubEnv("NACE_BASE_URL", "https://console.test.nace.ai/");
     vi.stubEnv("NACE_DEFAULT_DECISION_MODEL", "drex-v2.0");
     const drex = fakeDrex();
     await new NaceClassifier({ questions: URGENT, fetch: drex.fetch }).invoke("x");
-    expect(drex.requests[0]!.url).toBe("https://env.test/v1/systemone");
+    expect(drex.requests[0]!.url).toBe("https://console.test.nace.ai/v1/systemone");
     expect(drex.requests[0]!.body.model).toBe("drex-v2.0");
     expect(drex.requests[0]!.headers.get("authorization")).toBe("Bearer nace_sk_env");
   });

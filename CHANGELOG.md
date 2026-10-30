@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1
+
+- Require explicit provider keys outside the supported Nace HTTPS hosts; reject blank keys.
+- Pin the resolved destination in serialization and use provider-specific secret references.
+- Strip Vercel bypass headers for custom hosts and refuse HTTP redirects.
+- Match OpenRouter by exact hostname, including its DNS trailing-dot form.
+- Document upgrading from 0.1.0 and replacing credentials used with custom providers.
+
 ## 0.1.0
 
 First release.

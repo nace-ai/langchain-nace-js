@@ -283,13 +283,17 @@ export function clip(text: string, max: number): string {
   return `${text.slice(0, end)}…`;
 }
 
+/**
+ * The error's message, and the clipped text before the guidance is added, which
+ * is all that `cause` keeps of the SDK's error.
+ */
 function describe(
   provider: string,
   status: number,
   message: string | undefined,
   issues: Issue[],
   requestId: string | undefined,
-): string {
+): { message: string; summary: string } {
   // Gateways and proxies answer some failures with a whole HTML page.
   const html = message !== undefined && /^\s*<(?:!doctype|html)/i.test(message);
   let text = html
@@ -303,6 +307,7 @@ function describe(
   }
   // The full body and every issue stay on the error; the message is the short form.
   text = clip(text, MAX_MESSAGE_CHARS);
+  const summary = text;
   // Guidance is added after clipping, so a long body can't push it out.
   const guidance: string[] = [];
   if (status === 402) {
@@ -314,7 +319,7 @@ function describe(
   }
   if (requestId) guidance.push(`(request_id=${requestId})`);
   if (guidance.length > 0) text += `\n${clip(guidance.join("\n"), MAX_GUIDANCE_CHARS)}`;
-  return text;
+  return { message: text, summary };
 }
 
 /**
@@ -350,14 +355,17 @@ export function convertError(error: unknown, provider = "Drex"): unknown {
       message = unwrapped.message;
       if (issues.length === 0) issues = unwrapped.issues;
     }
-    const converted = new Class(describe(provider, status, message, issues, error.requestId), {
+    const { message: text, summary } = describe(provider, status, message, issues, error.requestId);
+    const converted = new Class(text, {
       status,
       requestId: error.requestId,
       type: error.type,
       issues,
       body: error.body,
       headers: error.headers,
-      cause: error,
+      // Not the SDK's error: printing an error prints its cause, and that one holds
+      // the whole response body and headers. The complete body stays on `body`.
+      cause: new Error(summary),
     });
     if (converted instanceof NaceRateLimitError && error instanceof sdk.RateLimitError) {
       converted.retryAfterMs = error.retryAfterMs;

@@ -15,7 +15,7 @@
 - Refuse a response that doesn't answer the questions asked: a missing answer, an answer of another type, a choice that was not offered, or a score legend of a different length than the rubric. Extra answers and unknown question types are still accepted. The error names the question (quoted, at most 64 characters) and never repeats text from the response.
 - Read the tool gate's risk against the rubric that was asked: an answer with a legend of another length is blocked as unchecked, not scaled by its own legend (a 100-level legend turned "Severe" into 0.04 and allowed the call).
 - `naceConditionalEdge` refuses an answer that is not one of the question's labels, so a label such as `__end__` can no longer pick the next node.
-- Keep API error messages short: an HTML error page from a gateway becomes one line, other text is cut to 500 characters, and the billing link and request id are added after the cut. The full `body` and every issue stay on the error.
+- Keep API error messages short: an HTML error page from a gateway becomes one line, other text is cut to 500 characters, and the billing link and request id are added after the cut. The full `body` and every issue stay on the error. The error's `cause` is a one-line summary instead of the SDK's error, so printing an error no longer prints the whole response.
 - A 402 from OpenRouter points to OpenRouter's credits page (`OPENROUTER_CREDITS_URL`) instead of the Drex billing page.
 - Refuse `modelKwargs` that set `model`, `state`, `questions` or `images`: `images` used to reach a text-only model and skip its refusal.
 

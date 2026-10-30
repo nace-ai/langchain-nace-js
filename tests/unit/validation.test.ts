@@ -1,4 +1,5 @@
 /** Responses must answer the questions that were asked; errors must stay small. */
+import { inspect } from "node:util";
 import { AIMessage, HumanMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
 import { createAgent } from "langchain";
@@ -258,6 +259,27 @@ describe("error size", () => {
     expect(error.message.length).toBeLessThanOrEqual(MAX + 1 + GUIDANCE);
     expect(error.message).toContain("(request_id=req_big)");
     expect(String(error.body).length).toBe(html.length);
+  });
+
+  it("keeps an oversized upstream error out of what inspect() prints", async () => {
+    const html = `<!doctype html><html><body>SENSITIVE-MARKER ${"<p>Bad gateway</p>".repeat(7_600)}SENSITIVE-MARKER</body></html>`;
+    expect(html.length).toBeGreaterThan(136_000);
+    const error = await fail(answering(502, html, { "content-type": "text/html" }));
+    const shown = inspect(error, { depth: 5 });
+    expect(shown.length).toBeLessThan(5_000);
+    expect(shown).not.toContain("SENSITIVE-MARKER");
+    expect(String(error.body)).toContain("SENSITIVE-MARKER");
+    expect(error.status).toBe(502);
+    expect(error.requestId).toBe("req_big");
+  });
+
+  it("keeps a large JSON body out of what inspect() prints", async () => {
+    const body = JSON.stringify({ error: { message: "x".repeat(5_000) + "SENSITIVE-MARKER" } });
+    const error = await fail(answering(500, body, { "content-type": "application/json" }));
+    const shown = inspect(error, { depth: 5 });
+    expect(shown.length).toBeLessThan(5_000);
+    expect(shown).not.toContain("SENSITIVE-MARKER");
+    expect(error.body.error.message).toContain("SENSITIVE-MARKER");
   });
 
   it("names OpenRouter for its HTML error page", async () => {

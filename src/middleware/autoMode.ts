@@ -457,25 +457,28 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
     return { decision: new Block(`its risk could not be checked (${name})`) };
   }
 
-  async function decide(
-    request: GatedToolCall,
-    signal?: AbortSignal,
-  ): Promise<{ decision: GateDecision; verdict?: GateVerdict }> {
-    let attempts: { state: Record<string, unknown>; images: ImageLike[] }[];
-    try {
-      const state = stateFor(request);
-      const images = await imagesFor(request);
-      attempts = [{ state, images: [] }];
-      if (images.length > 0) {
-        const shown = {
+  type DecisionAttempt = { state: State; images: ImageLike[] };
+
+  async function attemptsFor(request: GatedToolCall): Promise<DecisionAttempt[]> {
+    const state = stateFor(request);
+    const images = await imagesFor(request);
+    const attempts: DecisionAttempt[] = [{ state: state as State, images: [] }];
+    if (images.length > 0) {
+      attempts.unshift({
+        state: {
           ...state,
           screenshots: `Image 1 to Image ${images.length} show the screen.`,
-        };
-        attempts.unshift({ state: shown, images });
-      }
-    } catch (error) {
-      return failed(error, signal);
+        } as State,
+        images,
+      });
     }
+    return attempts;
+  }
+
+  async function decide(
+    attempts: DecisionAttempt[],
+    signal?: AbortSignal,
+  ): Promise<{ decision: GateDecision; verdict?: GateVerdict }> {
     for (const [index, attempt] of attempts.entries()) {
       try {
         const response = await classifier.invoke(attempt.state as State, {
@@ -520,14 +523,40 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
       // Only a pending interrupt reuses a verdict, and only for the same
       // tool and decision context. Completed calls and new user turns are checked again.
       const threadId = runtime?.configurable?.thread_id;
-      const key =
-        threadId != null && call.id
-          ? createHash("sha256")
-              .update(JSON.stringify([String(threadId), call.id, stateFor(gated)]))
-              .digest("hex")
-          : undefined;
-      const cached = cache.get(key);
-      const { decision, verdict } = cached ?? (await decide(gated, runtime?.signal));
+      let key: string | undefined;
+      let selected: { decision: GateDecision; verdict?: GateVerdict };
+      try {
+        runtime?.signal?.throwIfAborted();
+        let attempts = await attemptsFor(gated);
+        if (threadId != null && call.id) {
+          try {
+            // Use the actual wire input: it omits message artifacts and includes
+            // screenshot bytes. Reuse these snapshots for the request as well.
+            const prepared = attempts.map((attempt) =>
+              classifier.prepare(attempt.state, {
+                questions,
+                images: attempt.images,
+              }),
+            );
+            key = createHash("sha256")
+              .update(JSON.stringify([String(threadId), call.id, prepared]))
+              .digest("hex");
+            attempts = prepared.map((input) => ({
+              state: input.state as State,
+              images: input.images.map((image) =>
+                typeof image === "string" ? image : { ...image },
+              ),
+            }));
+          } catch {
+            // An invalid image may still permit the text-only fallback. Skip
+            // caching and let decide apply that retry and the configured error policy.
+          }
+        }
+        selected = cache.get(key) ?? (await decide(attempts, runtime?.signal));
+      } catch (error) {
+        selected = failed(error, runtime?.signal);
+      }
+      const { decision, verdict } = selected;
 
       const blockedText = (reason: string): string => {
         if (config.blockedMessage !== undefined) {

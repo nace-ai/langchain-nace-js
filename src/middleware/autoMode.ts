@@ -332,7 +332,7 @@ export interface NaceAutoModeMiddlewareConfig {
   policy?: GatePolicy;
   /** Shortcut for `policy: thresholdPolicy({ askHuman })`. */
   askHuman?: boolean;
-  /** `"block"` the call when Drex fails (default), or `"throw"` the error. */
+  /** `"block"` the call when Drex fails (default), or `"throw"` the error and fail the run. */
   onError?: "block" | "throw";
   /** How many recent messages to include. Default 20. */
   recentMessages?: number;

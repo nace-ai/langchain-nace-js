@@ -64,7 +64,7 @@ flowchart LR
     A -- "no checkpointer" --> B
 ```
 
-Resuming after an interrupt re-runs the hook. The decision is saved in the checkpoint as a LangGraph task, so the resume replays it on any worker: the person answers the question they were asked, and Drex isn't called twice. A changed context or policy blocks the call instead, and so does an answer that is already waiting when the gate has to decide again (after a state edit or a resume from an earlier checkpoint); a custom decision needs an `id` to be resumed.
+Resuming after an interrupt re-runs the hook. The decision is saved in the checkpoint as a LangGraph task, so the resume replays it on any worker: the person answers the question they were asked, and Drex isn't called twice. A changed context or policy blocks the call instead, and so does an answer that is already waiting when the gate has to decide again (after a state edit or a resume from an earlier checkpoint); a custom decision needs an `id` to be resumed. A check that fails with `onError: "throw"` fails the run and is not recorded, so a retry asks Drex again; with `onError: "block"` the failure is saved and replays as the same block.
 
 ## Data model
 

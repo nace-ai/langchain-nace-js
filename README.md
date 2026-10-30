@@ -213,6 +213,8 @@ It answers three questions: a risk score, "destructive?" and "did the user ask f
 - **If Drex can't answer, the call is blocked** (`onError: "block"`). A screenshot Drex can't read is dropped, and the check runs again without it.
 - **Everything is replaceable:** pass `questions`, `thresholdPolicy({ ... })`, or your own `(verdict) => GateDecision`.
 - **Resuming:** each checked call's decision is saved in the agent's checkpoint, as a LangGraph task named `NaceGateDecision`: Drex's answer, the decision, and a digest of what Drex saw (never screenshots or keys). A resume, on any worker, replays that decision and does not ask Drex again. If the conversation, the tool call, the screenshots or the policy's decision changed while the call was paused, the call is blocked and must be requested again; an earlier answer can't authorize something else. Completed calls and new turns are checked again.
+  - If the paused state is edited (for example with `updateState`) or an earlier checkpoint is resumed, the saved decision may not apply: the gate checks the call again, and if an answer is already waiting, the call is blocked instead of using an answer given for something else.
+  - A custom `GateDecision` needs an `id` to be resumed after a pause; without one the call is blocked and must be requested again.
   - With a checkpointer, each checked call adds one checkpoint write, and the task appears in traces and in the `updates`, `tasks` and `debug` stream modes.
   - Approving several parallel calls needs `createAgent`'s default `version: "v2"`.
   - Upgrading from 0.1.0: calls paused by 0.1.0 have no saved decision. Approve, reject or re-request them before upgrading; resuming one afterwards asks Drex again.

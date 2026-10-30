@@ -2,7 +2,7 @@
 
 ## 0.1.1
 
-- Save each tool-gate decision in the agent's checkpoint (a `NaceGateDecision` task) and replay it on resume, on any worker, without asking Drex again. A pending approval no longer survives a change in the call, its context or the policy, and a lower-risk recheck can no longer bypass a pending rejection, including for custom decisions. Calls paused by 0.1.0 must be resolved or requested again after upgrading.
+- Save each tool-gate decision in the agent's checkpoint (a `NaceGateDecision` task) and replay it on resume, on any worker, without asking Drex again. A pending approval no longer survives a change in the call, its context or the policy, and a lower-risk recheck can no longer bypass a pending rejection, including for custom decisions. If the paused state is edited or an earlier checkpoint is resumed, an answer that is already waiting blocks the call instead of applying to a new decision, and a custom `GateDecision` needs an `id` to be resumed after a pause. Calls paused by 0.1.0 must be resolved or requested again after upgrading.
 - Test the oldest supported `@langchain/core`, `@langchain/langgraph` and `langchain` releases with a single copy of each.
 - Exclude custom headers from inspection and serialization while preserving outgoing request headers.
 - Reject out-of-range probabilities, confidences and scores, and invalid score rubrics.

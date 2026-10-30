@@ -327,6 +327,19 @@ export class NaceClassifier extends Runnable<
     input: State,
     options?: Partial<NaceClassifierCallOptions>,
   ): Promise<ClassificationResponse> {
+    return this.runCall(input, options);
+  }
+
+  /**
+   * One traced request. `hooks` are the batch's: `beforeSend` runs right before the
+   * request is sent and can refuse it, `onFailure` sees a failed request's error
+   * before the run's error callbacks do.
+   */
+  private runCall(
+    input: State,
+    options?: Partial<NaceClassifierCallOptions>,
+    hooks?: DispatchHooks,
+  ): Promise<ClassificationResponse> {
     const config = {
       ...options,
       metadata: {
@@ -338,8 +351,16 @@ export class NaceClassifier extends Runnable<
     };
     // The config `_callWithConfig` hands over carries the run's signal, which also
     // covers `timeout` and a cancelled parent run.
-    const run = (state: State, runConfig?: { signal?: AbortSignal }) =>
-      this.classify(state, { ...options, signal: runConfig?.signal ?? options?.signal });
+    const run = async (state: State, runConfig?: { signal?: AbortSignal }) => {
+      const signal = runConfig?.signal ?? options?.signal;
+      try {
+        hooks?.beforeSend(signal);
+        return await this.classify(state, { ...options, signal });
+      } catch (error) {
+        hooks?.onFailure(error);
+        throw error;
+      }
+    };
     return this._callWithConfig(run, input, {
       ...config,
       runType: "llm",
@@ -348,9 +369,12 @@ export class NaceClassifier extends Runnable<
 
   /**
    * Answer many requests; at most `maxConcurrency` (default 8) at a time, in
-   * input order. No new request starts after a failure that rejects the batch,
-   * or, with `returnExceptions: true`, after a 401, 402 or 403 or cancellation:
-   * those inputs get a `NaceBatchStoppedError`.
+   * input order. After a failure that rejects the batch, or after a 401, 402 or
+   * 403 with `returnExceptions: true`, no new input is sent: requests already
+   * sent finish, including the SDK's own retries of them, and their results are
+   * discarded when the batch rejects. Inputs that were not sent get a
+   * `NaceBatchStoppedError` (and a run in your callbacks). A cancelled input
+   * fails alone.
    */
   override async batch(
     inputs: State[],
@@ -378,39 +402,58 @@ export class NaceClassifier extends Runnable<
     const results: (ClassificationResponse | Error)[] = new Array(inputs.length);
     let next = 0;
     let stopped: { error: unknown } | undefined;
+    const stoppedError = () =>
+      new NaceBatchStoppedError(
+        "Not sent: an earlier request in this batch failed, and this one would too.",
+        { cause: stopped?.error },
+      );
+    const hooks: DispatchHooks = {
+      // The last check before the request, so inputs whose start callbacks were
+      // still running when the batch stopped send nothing.
+      beforeSend: (signal) => {
+        if (stopped !== undefined) throw stoppedError();
+        // An input that was cancelled fails alone, and is not sent.
+        signal?.throwIfAborted();
+      },
+      // Decided before the error leaves the run, so before any error callback is awaited.
+      onFailure: (error) => {
+        if (!returnExceptions || stopsBatch(error)) stopped ??= { error };
+      },
+    };
+    // A run with the same start and error events as a failed request, but no request.
     const notSent = (index: number): Promise<unknown> =>
-      // A run with the same start and error events as a failed request, but no request.
       this._callWithConfig(
         () => {
-          throw new NaceBatchStoppedError(
-            "Not sent: an earlier request in this batch failed, and this one would too.",
-            { cause: stopped?.error },
-          );
+          throw stoppedError();
         },
         inputs[index] as State,
         { ...configs[index], runType: "llm" } as Partial<NaceClassifierCallOptions>,
       );
+    let rejectBatch!: (error: unknown) => void;
+    const rejected = new Promise<never>((_, reject) => {
+      rejectBatch = reject;
+    });
+    // Never throws: a failure is recorded, so the workers go on to give every
+    // input that was not sent its run, whether or not the batch has rejected.
     const worker = async (): Promise<void> => {
       while (next < inputs.length) {
         const index = next++;
-        if (stopped !== undefined) {
-          results[index] = (await notSent(index).catch((error: unknown) => error)) as Error;
-          continue;
-        }
+        const send = stopped === undefined;
         try {
-          results[index] = await this.invoke(inputs[index] as State, configs[index]);
+          results[index] = (await (send
+            ? this.runCall(inputs[index] as State, configs[index], hooks)
+            : notSent(index))) as ClassificationResponse;
         } catch (error) {
-          // Recorded before any await, so no other worker starts another request.
-          if (!returnExceptions) {
-            stopped ??= { error };
-            throw error;
-          }
           results[index] = error as Error;
-          if (stopsBatch(error, configs[index]?.signal)) stopped ??= { error };
+          if (send && !returnExceptions && !(error instanceof NaceBatchStoppedError)) {
+            rejectBatch(error);
+          }
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(limit, inputs.length) }, worker));
+    const done = Promise.all(Array.from({ length: Math.min(limit, inputs.length) }, worker));
+    // Without `returnExceptions`, reject at the first error; the workers finish in the background.
+    await (returnExceptions ? done : Promise.race([done, rejected]));
     return results;
   }
 
@@ -485,12 +528,17 @@ export class NaceClassifier extends Runnable<
   }
 }
 
-/** Failures every later request in a batch would repeat: the key, account or cancellation. */
+/** Failures every later request in a batch would repeat: the key or the account. */
 const BATCH_STOP_STATUSES = new Set([401, 402, 403]);
 
-function stopsBatch(error: unknown, signal?: AbortSignal): boolean {
-  if (signal?.aborted) return true;
+function stopsBatch(error: unknown): boolean {
   return NaceAPIError.isInstance(error) && BATCH_STOP_STATUSES.has(error.status);
+}
+
+/** What `batch` runs around each request. */
+interface DispatchHooks {
+  beforeSend(signal: AbortSignal | undefined): void;
+  onFailure(error: unknown): void;
 }
 
 /** OpenRouter takes images as `image_url` parts of a `state` content array. */

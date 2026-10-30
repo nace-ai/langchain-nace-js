@@ -8,6 +8,7 @@
 - Reject out-of-range probabilities, confidences and scores, and invalid score rubrics.
 - Preserve special answer IDs in typed response accessors.
 - batch: stop starting requests after a failure that rejects the batch, or after a 401, 402 or 403 with returnExceptions; honour batchOptions.maxConcurrency.
+- batch: after a failure that rejects the batch, or after a 401, 402 or 403 with returnExceptions, send no new input (requests already sent finish, including the SDK's own retries, and their results are discarded when the batch rejects); a cancelled input fails alone; inputs that were not sent get a callback run and a `NaceBatchStoppedError`; honour batchOptions.maxConcurrency.
 - Require explicit provider keys outside the production Nace HTTPS hosts; reject blank keys.
 - Pin the resolved destination in serialization and use provider-specific secret references.
 - Strip Vercel bypass headers for custom hosts and refuse HTTP redirects.

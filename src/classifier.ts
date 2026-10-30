@@ -355,10 +355,16 @@ export class NaceClassifier extends Runnable<
    * rejected, no new request is sent: requests already sent finish, including the
    * SDK's own retries of them, and their results are discarded when the batch
    * rejects. An input that was not sent fails with a `NaceBatchStoppedError` in its
-   * own run. A 401, 402 or 403 stops dispatch at once; after any other failure the
-   * batch stops when it rejects, so an input dispatched in between (for example while
-   * the failed input's error callbacks run) can still be sent. A cancelled input
-   * fails alone.
+   * own run. A 401, 402 or 403 means the classifier's key or account can't be used,
+   * so it stops every batch running on that classifier, including requests made from
+   * callbacks while those batches run, and stops dispatch at once. After any other
+   * failure the batch stops when it rejects, so an input dispatched in between (for
+   * example while the failed input's error callbacks run) can still be sent. A batch
+   * an `invoke` override starts with `this.batch` runs inside the batch it came from:
+   * it stops with it, and a terminal failure inside it stops that batch too; batches
+   * started on their own stay independent. An `invoke` override that recovers from
+   * an error keeps the batch going, except after a 401, 402 or 403, which always stop
+   * it. A cancelled input fails alone.
    */
   override async batch(
     inputs: State[],

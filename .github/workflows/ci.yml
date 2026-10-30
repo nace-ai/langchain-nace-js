@@ -46,8 +46,8 @@ jobs:
 
   lowest:
     # The oldest releases the peer ranges allow: @langchain/core 1.2.16 is the first
-    # with `ns` and `stampRetryable` in @langchain/core/errors; langchain 1.3.0 is the
-    # oldest that passes the middleware tests.
+    # with `ns` and `stampRetryable` in @langchain/core/errors; @langchain/langgraph 1.2.6
+    # and langchain 1.3.0 are the oldest that pass the middleware tests.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,7 +56,13 @@ jobs:
         with:
           node-version: 22
       - run: pnpm install --frozen-lockfile
-      - run: pnpm add -D @langchain/core@1.2.16 langchain@1.3.0
+      # langchain depends on @langchain/langgraph itself; without overrides pnpm keeps a
+      # second, newer copy for it, and interrupts no longer resume.
+      - run: pnpm add -D @langchain/core@1.2.16 @langchain/langgraph@1.2.6 langchain@1.3.0
+      - run: |
+          printf 'overrides:\n  "@langchain/core": 1.2.16\n  "@langchain/langgraph": 1.2.6\n' >> pnpm-workspace.yaml
+          pnpm install --no-frozen-lockfile
+      - run: node scripts/check-single-copy.mjs 1.2.16 1.2.6
       - run: pnpm test
 
   node20:

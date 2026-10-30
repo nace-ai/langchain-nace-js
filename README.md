@@ -42,6 +42,8 @@ npm install langchain @langchain/langgraph   # only for langchain-nace/middlewar
 export NACE_API_KEY=nace_sk_...
 ```
 
+Use 0.1.1 or later. Version 0.1.0 was withdrawn from npm.
+
 - **Node 20 or later.** ESM and CommonJS, with TypeScript types.
 - **Peers:** `@langchain/core` ≥ 1.2.16; for the middleware, `langchain` ≥ 1.3.0 and `@langchain/langgraph`.
 - **One copy of `@langchain/core` and `@langchain/langgraph`.** If your package manager installs two, add `overrides`/`resolutions`. With two copies, a `Command` from one isn't recognized by agents built on the other, so resuming after a person answers fails.
@@ -267,13 +269,6 @@ Vercel bypass headers are stripped for custom destinations. Requests refuse HTTP
 redirects; configure the final API URL directly. Serialized classifiers keep the
 resolved destination and use `OPENROUTER_API_KEY` for OpenRouter or
 `NACE_CUSTOM_API_KEY` for other custom hosts.
-
-**Upgrading from 0.1.0:** that version could send `NACE_API_KEY` to a custom
-provider when no explicit `apiKey` was supplied. Upgrade to 0.1.1 or later.
-If you used that configuration with real credentials, replace and revoke them;
-an upgrade cannot remove copies already received by another provider. Recreate
-and serialize custom-provider classifiers again: older saved manifests can
-still refer to `NACE_API_KEY`, even after upgrading.
 
 Malformed probabilities, confidence values or score rubrics raise `NaceAPIResponseValidationError`. The default tool-gate error policy blocks the call.
 

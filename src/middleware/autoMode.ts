@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 
 import { ToolMessage } from "@langchain/core/messages";
-import { interrupt, isGraphInterrupt } from "@langchain/langgraph";
+import { interrupt, task } from "@langchain/langgraph";
 import { createMiddleware } from "langchain";
 
 import { isTextOnly, NaceClassifier, type NaceClassifierFields } from "../classifier.js";
@@ -17,6 +17,7 @@ import type {
   Questions,
   Score,
 } from "../types.js";
+import { parseResponse } from "../types.js";
 import { isUserMessage, latestImages, withoutMedia } from "./media.js";
 
 /** Statuses after which a request with screenshots is retried once without them. */
@@ -333,31 +334,44 @@ export interface NaceAutoModeMiddlewareConfig {
   blockedMessage?: string;
 }
 
-type PendingVerdict = { decision: GateDecision; verdict?: GateVerdict; inputKey: string };
+/** Bumped when the stored shape changes; other versions are treated as unreadable. */
+const GATE_RECORD_VERSION = 1;
 
-/** Remembers a pending approval and the exact decision input it covered. */
-class VerdictCache {
-  private readonly entries = new Map<string, PendingVerdict>();
+/**
+ * What a gated call keeps in the checkpoint. JSON only: digests, Drex's
+ * response text and the decision's kind. No screenshots, state or credentials.
+ */
+interface GateRecord {
+  v: typeof GATE_RECORD_VERSION;
+  callId: string | null;
+  inputKey: string | null;
+  /** Drex's response body as JSON text, or null when the check failed. */
+  response: string | null;
+  requestId: string | null;
+  decision: string;
+  /** The error's name when the check failed (the call was blocked). */
+  error: string | null;
+}
 
-  constructor(private readonly size = 256) {}
+function isGateRecord(value: unknown): value is GateRecord {
+  return (
+    isRecord(value) &&
+    value.v === GATE_RECORD_VERSION &&
+    (value.callId === null || typeof value.callId === "string") &&
+    (value.inputKey === null || typeof value.inputKey === "string") &&
+    (value.response === null || typeof value.response === "string") &&
+    (value.requestId === null || typeof value.requestId === "string") &&
+    typeof value.decision === "string" &&
+    (value.error === null || typeof value.error === "string")
+  );
+}
 
-  get(id: string | undefined) {
-    return id ? this.entries.get(id) : undefined;
-  }
-
-  delete(id: string | undefined): void {
-    if (id) this.entries.delete(id);
-  }
-
-  set(id: string | undefined, value: PendingVerdict): void {
-    if (!id) return;
-    this.entries.delete(id);
-    this.entries.set(id, value);
-    if (this.entries.size > this.size) {
-      const oldest = this.entries.keys().next().value;
-      if (oldest !== undefined) this.entries.delete(oldest);
-    }
-  }
+/** A stable name for a decision's behaviour, to detect a policy change on resume. */
+function decisionKind(decision: GateDecision): string {
+  if (decision instanceof AskHuman) return "ask";
+  if (decision instanceof Block) return "block";
+  if (decision instanceof Allow) return "allow";
+  return `custom:${decision.constructor.name}`;
 }
 
 /**
@@ -425,7 +439,6 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
 
   const policyMetadata =
     "options" in policy ? (policy as { options: unknown }).options : policy.name || "custom";
-  const cache = new VerdictCache();
 
   function stateFor(request: GatedToolCall): Record<string, unknown> {
     const messages = request.state.messages ?? [];
@@ -460,6 +473,7 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
   }
 
   type DecisionAttempt = { state: State; images: ImageLike[] };
+  type Selected = { decision: GateDecision; verdict?: GateVerdict };
 
   async function attemptsFor(request: GatedToolCall): Promise<DecisionAttempt[]> {
     const state = stateFor(request);
@@ -477,35 +491,64 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
     return attempts;
   }
 
-  async function decide(
-    attempts: DecisionAttempt[],
-    signal?: AbortSignal,
-  ): Promise<{ decision: GateDecision; verdict?: GateVerdict }> {
+  /** Ask Drex, falling back to text only when screenshots are refused. Throws on failure. */
+  async function ask(attempts: DecisionAttempt[], signal?: AbortSignal) {
     for (const [index, attempt] of attempts.entries()) {
       try {
-        const response = await classifier.invoke(attempt.state as State, {
+        return await classifier.invoke(attempt.state as State, {
           questions,
           images: attempt.images,
           runName: "NaceAutoMode",
           metadata: { nace_policy: policyMetadata },
           ...(signal ? { signal } : {}),
         });
-        const verdict = verdictFromResponse(response);
-        const typeSafe = response.nouls[TYPESAFE_RISK_ID];
-        if (typeSafeRisk && (typeSafe === undefined || typeSafe.noul >= TYPESAFE_THRESHOLD)) {
-          return { decision: new Block("it was classified as risky"), verdict };
-        }
-        return { decision: policy(verdict), verdict };
       } catch (error) {
         // A screenshot Drex refused, or one this package can't send, shouldn't
         // block the call: the check runs again without images.
         const refusedImages =
           (NaceAPIError.isInstance(error) && IMAGE_RETRY_STATUSES.has(error.status)) ||
           NaceImageError.isInstance(error);
-        if (!(index + 1 < attempts.length && refusedImages)) return failed(error, signal);
+        if (!(index + 1 < attempts.length && refusedImages)) throw error;
       }
     }
-    return failed(new NaceError("No request was sent."), signal);
+    throw new NaceError("No request was sent.");
+  }
+
+  /** Turn Drex's answers into a decision. Deterministic for a given response. */
+  function decisionFor(response: ClassificationResponse): Selected {
+    const verdict = verdictFromResponse(response);
+    const typeSafe = response.nouls[TYPESAFE_RISK_ID];
+    if (typeSafeRisk && (typeSafe === undefined || typeSafe.noul >= TYPESAFE_THRESHOLD)) {
+      return { decision: new Block("it was classified as risky"), verdict };
+    }
+    return { decision: policy(verdict), verdict };
+  }
+
+  /** Re-derive a paused call's decision from its checkpointed record. */
+  function replay(record: unknown, callId: string | null, inputKey: string | null): Selected {
+    const stop = (reason: string, verdict?: GateVerdict): Selected => ({
+      decision: new Block(`${reason}; request a new tool call`),
+      ...(verdict ? { verdict } : {}),
+    });
+    if (!isGateRecord(record)) return stop("the paused decision could not be read");
+    if (record.response === null) return stop("the paused decision could not be read");
+    let selected: Selected;
+    try {
+      selected = decisionFor(
+        parseResponse(JSON.parse(record.response), record.requestId ?? undefined),
+      );
+    } catch {
+      return stop("the paused decision could not be read");
+    }
+    // LangGraph's resume value answers the original interrupt. It must not approve a
+    // different call or context, even if the current policy would also ask a person.
+    if (record.callId !== callId || record.inputKey === null || record.inputKey !== inputKey) {
+      return stop("the decision context changed while the call was paused", selected.verdict);
+    }
+    if (decisionKind(selected.decision) !== record.decision) {
+      return stop("the gate's policy changed while the call was paused", selected.verdict);
+    }
+    return selected;
   }
 
   return createMiddleware({
@@ -522,30 +565,28 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
           runtime?: { configurable?: Record<string, unknown>; signal?: AbortSignal };
         }
       ).runtime;
-      // Only a pending interrupt reuses a verdict, and only for the same
-      // tool and decision context. Completed calls and new user turns are checked again.
       const threadId = runtime?.configurable?.thread_id;
-      let key: string | undefined;
-      let inputKey: string | undefined;
-      let selected: { decision: GateDecision; verdict?: GateVerdict };
+      const signal = runtime?.signal;
+      let selected: Selected;
       try {
-        runtime?.signal?.throwIfAborted();
-        if (threadId != null && call.id) {
-          key = createHash("sha256")
-            .update(JSON.stringify([String(threadId), call.id]))
-            .digest("hex");
-        }
+        signal?.throwIfAborted();
         let attempts = await attemptsFor(gated);
-        if (key !== undefined) {
+        let inputKey: string | null = null;
+        if (threadId != null) {
           try {
             // Use the actual wire input: it omits message artifacts and includes
             // screenshot bytes. Reuse these snapshots for the request as well.
-            const prepared = attempts.map((attempt) =>
-              classifier.prepare(attempt.state, {
-                questions,
-                images: attempt.images,
-              }),
-            );
+            const prepared: ReturnType<NaceClassifier["prepare"]>[] = [];
+            for (const [index, attempt] of attempts.entries()) {
+              try {
+                prepared.push(
+                  classifier.prepare(attempt.state, { questions, images: attempt.images }),
+                );
+              } catch (error) {
+                // Locally unreadable images use the same text fallback as `ask`.
+                if (!(NaceImageError.isInstance(error) && index + 1 < attempts.length)) throw error;
+              }
+            }
             inputKey = createHash("sha256").update(JSON.stringify(prepared)).digest("hex");
             attempts = prepared.map((input) => ({
               state: input.state as State,
@@ -554,28 +595,61 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
               ),
             }));
           } catch {
-            // An invalid image may still permit the text-only fallback. Skip
-            // caching and let decide apply that retry and the configured error policy.
-            // Retain the call key so an existing approval cannot cover unknown input.
+            // Other preparation errors reach `ask`, which fails the same way and
+            // applies the configured error policy. Nothing is recorded.
           }
         }
-        const pending = cache.get(key);
-        selected =
-          pending && pending.inputKey === inputKey
-            ? pending
-            : await decide(attempts, runtime?.signal);
-        if (pending && pending.inputKey !== inputKey) {
-          // LangGraph's resume value answers the old interrupt. It must not
-          // approve a different context, even if the new policy also asks a person.
-          selected = {
-            decision: new Block(
-              "the decision context changed while approval was pending; request a new tool call",
-            ),
-            verdict: selected.verdict,
-          };
+        const callId = call.id ?? null;
+        // Set by `decideNow` when it runs in this invocation (not on a replay).
+        const now: { selected?: Selected; failure?: { error: unknown } } = {};
+        const decideNow = async (): Promise<GateRecord> => {
+          const base = { v: GATE_RECORD_VERSION, callId, inputKey } as const;
+          try {
+            const response = await ask(attempts, signal);
+            const selected = decisionFor(response);
+            now.selected = selected;
+            return {
+              ...base,
+              response: JSON.stringify(response.raw),
+              requestId: response.requestId ?? null,
+              decision: decisionKind(selected.decision),
+              error: null,
+            };
+          } catch (error) {
+            // Never throw from the task: a task error fails the whole graph run and
+            // bypasses `onError`. The failure is applied below, as without a checkpoint.
+            now.failure = { error };
+            const name = isRecord(error) && typeof error.name === "string" ? error.name : "Error";
+            return { ...base, response: null, requestId: null, decision: "block", error: name };
+          }
+        };
+        // A task's result is kept in the agent's checkpoint, so a resume on any
+        // worker sees the decision the person was asked about. Outside a LangGraph
+        // run (no thread, or a direct call) nothing can be resumed: decide directly.
+        const recorded = (): Promise<unknown> | undefined => {
+          if (threadId == null) return undefined;
+          try {
+            return task("NaceGateDecision", decideNow)() as Promise<unknown>;
+          } catch {
+            return undefined; // Throws synchronously outside a LangGraph run.
+          }
+        };
+        let stored: unknown;
+        for (;;) {
+          now.selected = undefined;
+          now.failure = undefined;
+          stored = await (recorded() ?? decideNow());
+          if (now.selected !== undefined || now.failure !== undefined) break; // decided now
+          // A replayed failed check never asked anyone, so check again; the new
+          // result is recorded by the next task call, which replays deterministically.
+          if (!(isGateRecord(stored) && stored.error !== null)) break;
         }
+        const failure = now.failure as { error: unknown } | undefined;
+        if (failure !== undefined) throw failure.error;
+        selected = now.selected ?? replay(stored, callId, inputKey);
+        signal?.throwIfAborted();
       } catch (error) {
-        selected = failed(error, runtime?.signal);
+        selected = failed(error, signal);
       }
       const { decision, verdict } = selected;
 
@@ -606,21 +680,12 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
             artifact: { nace_verdict: verdict ? verdictSummary(verdict) : null },
           }),
       };
-      try {
-        const result = await decision.apply(
-          gated,
-          handler as unknown as Handler<GatedToolCall>,
-          verdict,
-          context,
-        );
-        cache.delete(key);
-        return result as Awaited<ReturnType<typeof handler>>;
-      } catch (error) {
-        if (isGraphInterrupt(error) && inputKey !== undefined)
-          cache.set(key, { decision, verdict, inputKey });
-        else cache.delete(key);
-        throw error;
-      }
+      return (await decision.apply(
+        gated,
+        handler as unknown as Handler<GatedToolCall>,
+        verdict,
+        context,
+      )) as Awaited<ReturnType<typeof handler>>;
     },
   });
 }

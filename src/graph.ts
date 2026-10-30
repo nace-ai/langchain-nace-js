@@ -1,7 +1,7 @@
 import type { RunnableConfig } from "@langchain/core/runnables";
 
 import { NaceClassifier, type NaceClassifierFields } from "./classifier.js";
-import { NaceError } from "./errors.js";
+import { NaceAPIResponseValidationError, NaceError } from "./errors.js";
 import type { State } from "./state.js";
 import type { Choice } from "./types.js";
 
@@ -58,6 +58,13 @@ export function naceConditionalEdge<GraphState>(
     const answer = response.choices[QUESTION_ID];
     if (answer === undefined) {
       throw new NaceError("Drex returned no answer for the routing question.");
+    }
+    // The label becomes a node name, so one the question never offered (such as
+    // LangGraph's `__end__`) must not steer the graph.
+    if (!Object.hasOwn(options.question.criteria, answer.choice)) {
+      throw new NaceAPIResponseValidationError(
+        "Drex answered the routing question with a label that was not offered.",
+      );
     }
     return answer.confidence >= options.minConfidence ? answer.choice : lowConfidence;
   };

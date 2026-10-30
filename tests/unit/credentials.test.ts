@@ -31,23 +31,19 @@ it("refuses a custom environment destination and a blank explicit key", () => {
   expect(() => new NaceClassifier({ apiKey: " " })).toThrow(/empty/);
 });
 
-it.each([
-  "console.nace.ai",
-  "console.test.nace.ai",
-  "console.stage.nace.ai",
-  "drex.nace.ai",
-  "drex.test.nace.ai",
-  "drex.stage.nace.ai",
-])("keeps ambient authentication working at %s", async (host) => {
-  vi.stubEnv("NACE_API_KEY", "nace_sk_ambient");
-  const server = fakeDrex();
-  await new NaceClassifier({
-    baseUrl: `https://${host}:443`,
-    fetch: server.fetch,
-    questions,
-  }).invoke("x");
-  expect(server.requests[0]!.headers.get("authorization")).toBe("Bearer nace_sk_ambient");
-});
+it.each(["console.nace.ai", "drex.nace.ai"])(
+  "keeps ambient authentication working at %s",
+  async (host) => {
+    vi.stubEnv("NACE_API_KEY", "nace_sk_ambient");
+    const server = fakeDrex();
+    await new NaceClassifier({
+      baseUrl: `https://${host}:443`,
+      fetch: server.fetch,
+      questions,
+    }).invoke("x");
+    expect(server.requests[0]!.headers.get("authorization")).toBe("Bearer nace_sk_ambient");
+  },
+);
 
 it.each([
   ["https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"],
@@ -79,11 +75,11 @@ it.each([
 
 it("pins an environment destination in the serialized constructor", () => {
   vi.stubEnv("NACE_API_KEY", "nace_sk_ambient");
-  vi.stubEnv("NACE_BASE_URL", "https://console.test.nace.ai");
+  vi.stubEnv("NACE_BASE_URL", "https://drex.nace.ai");
   const classifier = new NaceClassifier();
   vi.stubEnv("NACE_BASE_URL", "https://custom.example");
   expect(classifier.toJSON()).toMatchObject({
-    kwargs: { base_url: "https://console.test.nace.ai" },
+    kwargs: { base_url: "https://drex.nace.ai" },
   });
 });
 

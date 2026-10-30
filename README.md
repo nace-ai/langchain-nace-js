@@ -237,8 +237,7 @@ Every request sends `User-Agent` and `X-Nace-Client: langchain-nace-js/<version>
 ### Credentials and custom providers
 
 `NACE_API_KEY` is read automatically only for HTTPS on port 443 at
-`console.nace.ai`, `console.test.nace.ai`, `console.stage.nace.ai`, and their
-legacy `drex` equivalents. Other hosts, including localhost, require an explicit
+`console.nace.ai` and its legacy production alias `drex.nace.ai`. Other hosts, including localhost, require an explicit
 provider key. A blank explicit key is refused.
 
 ```ts

@@ -2,7 +2,7 @@
 
 ## 0.1.1
 
-- Require explicit provider keys outside the supported Nace HTTPS hosts; reject blank keys.
+- Require explicit provider keys outside the production Nace HTTPS hosts; reject blank keys.
 - Pin the resolved destination in serialization and use provider-specific secret references.
 - Strip Vercel bypass headers for custom hosts and refuse HTTP redirects.
 - Match OpenRouter by exact hostname, including its DNS trailing-dot form.

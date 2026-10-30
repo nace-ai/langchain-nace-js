@@ -52,14 +52,7 @@ function isOpenRouter(baseUrl: string): boolean {
   }
 }
 
-const NACE_HOSTS = new Set([
-  "console.nace.ai",
-  "console.test.nace.ai",
-  "console.stage.nace.ai",
-  "drex.nace.ai",
-  "drex.test.nace.ai",
-  "drex.stage.nace.ai",
-]);
+const NACE_HOSTS = new Set(["console.nace.ai", "drex.nace.ai"]);
 
 function isNaceDestination(baseUrl: string): boolean {
   try {

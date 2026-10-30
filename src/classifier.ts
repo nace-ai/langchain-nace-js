@@ -1,8 +1,21 @@
-import { Runnable, type RunnableConfig } from "@langchain/core/runnables";
+import { AsyncLocalStorage } from "node:async_hooks";
+
+import {
+  Runnable,
+  type RunnableBatchOptions,
+  type RunnableConfig,
+} from "@langchain/core/runnables";
 import { getEnvironmentVariable } from "@langchain/core/utils/env";
 import { type ImageInput, NaceClient, NaceError as SdkNaceError } from "nace-sdk";
 
-import { convertError, NaceError, NaceImageError, NaceImageModelError } from "./errors.js";
+import {
+  convertError,
+  NaceAPIError,
+  NaceBatchStoppedError,
+  NaceError,
+  NaceImageError,
+  NaceImageModelError,
+} from "./errors.js";
 import { asDataUrl, type ImageLike, toDrexImage } from "./images.js";
 import { encodeState, type State } from "./state.js";
 import {
@@ -389,30 +402,69 @@ export class NaceClassifier extends Runnable<
     } as Partial<NaceClassifierCallOptions> & { runType: string });
   }
 
-  /** Answer many requests; at most `maxConcurrency` (default 8) at a time. */
+  /**
+   * Answer many requests with LangChain's own `batch`: each input goes through
+   * `invoke` (so an overridden `invoke` applies), at most `maxConcurrency` (default
+   * 8) at a time, in input order. After a 401, 402 or 403, or once the batch has
+   * rejected, no new request is sent: requests already sent finish, including the
+   * SDK's own retries of them, and their results are discarded when the batch
+   * rejects. An input that was not sent fails with a `NaceBatchStoppedError` in its
+   * own run. A 401, 402 or 403 stops the batch it happens in, and the batches nested
+   * in it. Another batch running at the same time stops at its own first 401, 402 or
+   * 403. Such a failure means the classifier's key or account can't be used, so
+   * dispatch stops at once. After any other failure the batch stops when it rejects,
+   * so an input dispatched in between (for example while the failed input's error
+   * callbacks run) can still be sent. A batch an `invoke` override starts with
+   * `this.batch` runs inside the batch it came from: it stops with it, and a terminal
+   * failure inside it stops that batch too; batches started on their own stay
+   * independent. An `invoke` override that recovers from an error keeps the batch
+   * going, except after a 401, 402 or 403, which always stop it. A cancelled input
+   * fails alone.
+   */
   override async batch(
     inputs: State[],
     options?: Partial<NaceClassifierCallOptions> | Partial<NaceClassifierCallOptions>[],
-    batchOptions?: { returnExceptions?: false },
+    batchOptions?: RunnableBatchOptions & { returnExceptions?: false },
   ): Promise<ClassificationResponse[]>;
 
   override async batch(
     inputs: State[],
     options?: Partial<NaceClassifierCallOptions> | Partial<NaceClassifierCallOptions>[],
-    batchOptions?: { returnExceptions: true },
+    batchOptions?: RunnableBatchOptions & { returnExceptions: true },
   ): Promise<(ClassificationResponse | Error)[]>;
 
   override async batch(
     inputs: State[],
     options?: Partial<NaceClassifierCallOptions> | Partial<NaceClassifierCallOptions>[],
-    batchOptions?: { returnExceptions?: boolean },
+    batchOptions?: RunnableBatchOptions,
   ): Promise<(ClassificationResponse | Error)[]> {
-    const withLimit = (config?: Partial<NaceClassifierCallOptions>) => ({
-      ...config,
-      maxConcurrency: config?.maxConcurrency ?? this.maxConcurrency,
-    });
-    const configs = Array.isArray(options) ? options.map(withLimit) : withLimit(options);
-    return super.batch(inputs, configs, batchOptions as { returnExceptions: true });
+    // A batch started while one of this classifier's batches is running (an `invoke`
+    // override answering its input with `this.batch`) runs inside that batch's fate.
+    const active = batchContext.getStore();
+    const state: BatchState = {
+      owner: this,
+      parent: active?.owner === this ? active : undefined,
+      stopped: false,
+      stops: new WeakSet(),
+    };
+    // Everything below runs in this batch's context, which `classify` reads right
+    // before it sends: the stop reaches it whatever an overridden `invoke` does with
+    // the options, and every input keeps its own run.
+    return batchContext.run(state, () =>
+      super
+        .batch(inputs, options, {
+          ...batchOptions,
+          maxConcurrency: batchOptions?.maxConcurrency ?? this.maxConcurrency,
+        })
+        .catch((error: unknown) => {
+          // Another input's stop may reject first; report the failure behind it, which
+          // may be an enclosing batch's.
+          const reason = state.stops.has(error as object) ? (error as Error).cause : error;
+          state.stopped = true;
+          state.cause ??= reason;
+          throw reason;
+        }),
+    );
   }
 
   /** The request body fields for one call, before the SDK adds `model` defaults. */
@@ -473,6 +525,19 @@ export class NaceClassifier extends Runnable<
       questions: prepared.questions,
     };
     if (prepared.images.length > 0) request.images = prepared.images;
+    const batch = batchContext.getStore();
+    const current = batch?.owner === this ? batch : undefined;
+    const stopped = current ? stoppedBatch(current) : undefined;
+    if (current && stopped) {
+      const stop = new NaceBatchStoppedError(
+        "Not sent: an earlier request in this batch failed, and this one would too.",
+        { cause: stopped.cause },
+      );
+      current.stops.add(stop);
+      throw stop;
+    }
+    // A cancelled input is not sent.
+    options?.signal?.throwIfAborted();
     try {
       const { data, requestId } = await this.client
         // The SDK's request type is narrower than what Drex accepts (structured
@@ -481,9 +546,48 @@ export class NaceClassifier extends Runnable<
         .withResponse();
       return parseResponse(data, requestId ?? undefined, prepared.questions);
     } catch (error) {
-      throw convertError(error, this.provider);
+      const converted = convertError(error, this.provider);
+      // Recorded before the error leaves the request, so before any callback runs.
+      if (current && stopsBatch(converted)) {
+        // The key or the account can't be used: this batch and the ones it runs in stop.
+        for (let level: BatchState | undefined = current; level; level = level.parent) {
+          level.stopped = true;
+          level.cause ??= converted;
+        }
+      }
+      throw converted;
     }
   }
+}
+
+/** Failures every later request in a batch would repeat: the key or the account. */
+const BATCH_STOP_STATUSES = new Set([401, 402, 403]);
+
+function stopsBatch(error: unknown): boolean {
+  return NaceAPIError.isInstance(error) && BATCH_STOP_STATUSES.has(error.status);
+}
+
+/** What `batch` shares with the requests it dispatches. */
+interface BatchState {
+  owner: NaceClassifier;
+  /** The batch of this classifier this one was started inside, if any. */
+  parent?: BatchState;
+  stopped: boolean;
+  /** The failure that stopped the batch. */
+  cause?: unknown;
+  /** The stop errors this batch raised, to tell them from its inputs' own failures. */
+  stops: WeakSet<object>;
+}
+
+/** The batch a request belongs to, if any; set by `batch`, read by `classify`. */
+const batchContext = new AsyncLocalStorage<BatchState>();
+
+/** The batch, or the nearest enclosing one, that has stopped. */
+function stoppedBatch(batch: BatchState): BatchState | undefined {
+  for (let level: BatchState | undefined = batch; level; level = level.parent) {
+    if (level.stopped) return level;
+  }
+  return undefined;
 }
 
 /** OpenRouter takes images as `image_url` parts of a `state` content array. */

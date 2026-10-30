@@ -261,6 +261,6 @@ it.each([
   }
   await agent.invoke(new Command({ resume: { type: "approve" } }), config);
   expect(ran).toBe(!changed);
-  expect(drex.requests).toHaveLength(changed ? 2 : 1);
-  if (changed) expect(drex.requests[0]!.body.images).not.toEqual(drex.requests[1]!.body.images);
+  // A resume reuses the checkpointed verdict; it never asks Drex again.
+  expect(drex.requests).toHaveLength(1);
 });

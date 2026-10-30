@@ -266,6 +266,20 @@ function bodyIssues(body: unknown): Issue[] {
   return issuesFrom(body.detail);
 }
 
+/** A message is cut to this many characters, so an odd body can't flood logs. */
+const MAX_MESSAGE_CHARS = 500;
+/** The billing link and the request id, which are kept, are cut to this many. */
+const MAX_GUIDANCE_CHARS = 350;
+
+function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let end = max - 1;
+  // Don't leave half of a surrogate pair at the cut.
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${text.slice(0, end)}…`;
+}
+
 function describe(
   provider: string,
   status: number,
@@ -273,16 +287,24 @@ function describe(
   issues: Issue[],
   requestId: string | undefined,
 ): string {
-  let text = `${provider} returned ${status}`;
-  if (message) text += `: ${message}`;
+  // Gateways and proxies answer some failures with a whole HTML page.
+  const html = message !== undefined && /^\s*<(?:!doctype|html)/i.test(message);
+  let text = html
+    ? `${provider} returned an HTML error page (HTTP ${status})`
+    : `${provider} returned ${status}${message ? `: ${message}` : ""}`;
   const lines = issues.map((issue) => `${issue.path || "(request)"}: ${issue.message}`);
   // Drex's top-level message often repeats its only issue; don't print it twice.
   const repeated = issues.length === 1 && issues[0]?.message === message;
   if (lines.length > 0 && !repeated && !(lines.length === 1 && lines[0] === message)) {
     text += `\n${lines.map((line) => `  ${line}`).join("\n")}`;
   }
-  if (status === 402) text += `\nAdd funds at ${BILLING_URL}`;
-  if (requestId) text += `\n(request_id=${requestId})`;
+  // The full body and every issue stay on the error; the message is the short form.
+  text = clip(text, MAX_MESSAGE_CHARS);
+  // Guidance is added after clipping, so a long body can't push it out.
+  const guidance: string[] = [];
+  if (status === 402) guidance.push(`Add funds at ${BILLING_URL}`);
+  if (requestId) guidance.push(`(request_id=${requestId})`);
+  if (guidance.length > 0) text += `\n${clip(guidance.join("\n"), MAX_GUIDANCE_CHARS)}`;
   return text;
 }
 

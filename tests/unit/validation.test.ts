@@ -4,12 +4,13 @@ import { tool } from "@langchain/core/tools";
 import { createAgent } from "langchain";
 import { describe, expect, it } from "vitest";
 import * as z from "zod/v4";
-
+import { BILLING_URL } from "../../src/errors.js";
 import {
   type ClassificationResponse,
   NaceAPIResponseValidationError,
   NaceClassifier,
   NaceError,
+  NaceInsufficientCreditError,
   naceConditionalEdge,
 } from "../../src/index.js";
 import { naceAutoModeMiddleware, verdictFromResponse } from "../../src/middleware/index.js";
@@ -194,5 +195,80 @@ describe("conditional edge", () => {
     const error = await edge("__end__")("hi").catch((e) => e);
     expect(error).toBeInstanceOf(NaceAPIResponseValidationError);
     expect(error.message).not.toContain("__end__");
+  });
+});
+
+describe("error size", () => {
+  const MAX = 500;
+  const GUIDANCE = 350;
+
+  /** A fetch that answers every request with `status` and a raw body. */
+  const answering =
+    (status: number, text: string, headers: Record<string, string> = {}) =>
+    async () =>
+      new Response(text, { status, headers: { "x-request-id": "req_big", ...headers } });
+  const fail = (fetch: typeof globalThis.fetch, extra: Record<string, unknown> = {}) =>
+    new NaceClassifier(
+      offline(fetch, {
+        questions: { q: { type: "noul", instructions: "?" } },
+        maxRetries: 0,
+        ...extra,
+      }),
+    )
+      .invoke("x")
+      .catch((e) => e);
+
+  it("summarises an HTML error page and keeps the page on the error", async () => {
+    const html = `<!doctype html><html><body>${"<p>Bad gateway</p>".repeat(6_500)}</body></html>`;
+    expect(html.length).toBeGreaterThan(114_000);
+    const error = await fail(answering(502, html, { "content-type": "text/html" }));
+    expect(error.status).toBe(502);
+    expect(error.message).toContain("Drex returned an HTML error page (HTTP 502)");
+    expect(error.message.length).toBeLessThanOrEqual(MAX + 1 + GUIDANCE);
+    expect(error.message).toContain("(request_id=req_big)");
+    expect(String(error.body).length).toBe(html.length);
+  });
+
+  it("names OpenRouter for its HTML error page", async () => {
+    const error = await fail(answering(502, "<html>nope</html>", { "content-type": "text/html" }), {
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "sk-or-test",
+    });
+    expect(error.message).toContain("OpenRouter returned an HTML error page (HTTP 502)");
+  });
+
+  it("clips a long message and a long list of issues", async () => {
+    const issues = Array.from({ length: 2_000 }, (_, i) => ({
+      path: `questions.${i}`,
+      message: `question ${i} is not valid`,
+    }));
+    const body = JSON.stringify({ error: { message: "Invalid request", issues } });
+    const error = await fail(answering(422, body, { "content-type": "application/json" }));
+    expect(error.issues).toHaveLength(2_000);
+    expect(error.message).toMatch(/^Drex returned 422: Invalid request\n {2}questions\.0:/);
+    expect(error.message.length).toBeLessThanOrEqual(MAX + 1 + GUIDANCE);
+    expect(error.message).toContain("(request_id=req_big)");
+  });
+
+  it("keeps the billing guidance and the request id after clipping a 402", async () => {
+    const body = JSON.stringify({ error: { message: "x".repeat(5_000) } });
+    const error = await fail(answering(402, body, { "content-type": "application/json" }));
+    expect(error).toBeInstanceOf(NaceInsufficientCreditError);
+    expect(error.message).toContain(`Add funds at ${BILLING_URL}`);
+    expect(error.message).toContain("(request_id=req_big)");
+    expect(error.message.length).toBeLessThanOrEqual(MAX + 1 + GUIDANCE);
+    expect(error.body.error.message).toHaveLength(5_000);
+  });
+
+  it("clips an oversized request id too", async () => {
+    const body = JSON.stringify({ error: { message: "Insufficient funds" } });
+    const error = await fail(
+      answering(402, body, {
+        "content-type": "application/json",
+        "x-request-id": "r".repeat(5_000),
+      }),
+    );
+    expect(error.message).toContain(`Add funds at ${BILLING_URL}`);
+    expect(error.message.length).toBeLessThanOrEqual(MAX + 1 + GUIDANCE);
   });
 });

@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 
 import { ToolMessage } from "@langchain/core/messages";
-import { interrupt } from "@langchain/langgraph";
+import { interrupt, isGraphInterrupt } from "@langchain/langgraph";
 import { createMiddleware } from "langchain";
 
 import { isTextOnly, NaceClassifier, type NaceClassifierFields } from "../classifier.js";
@@ -343,6 +343,10 @@ class VerdictCache {
     return id ? this.entries.get(id) : undefined;
   }
 
+  delete(id: string | undefined): void {
+    if (id) this.entries.delete(id);
+  }
+
   set(id: string | undefined, value: { decision: GateDecision; verdict?: GateVerdict }): void {
     if (!id) return;
     this.entries.delete(id);
@@ -513,20 +517,17 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
           runtime?: { configurable?: Record<string, unknown>; signal?: AbortSignal };
         }
       ).runtime;
-      // Resuming after an interrupt re-runs this hook; within one thread, reuse
-      // the first verdict so the person answers the question they were asked.
-      // The key covers the tool and its arguments, so a different call that
-      // happens to reuse an id is checked on its own.
+      // Only a pending interrupt reuses a verdict, and only for the same
+      // tool and decision context. Completed calls and new user turns are checked again.
       const threadId = runtime?.configurable?.thread_id;
       const key =
         threadId != null && call.id
           ? createHash("sha256")
-              .update(JSON.stringify([String(threadId), call.id, call.name, call.args ?? null]))
+              .update(JSON.stringify([String(threadId), call.id, stateFor(gated)]))
               .digest("hex")
           : undefined;
       const cached = cache.get(key);
       const { decision, verdict } = cached ?? (await decide(gated, runtime?.signal));
-      cache.set(key, { decision, verdict });
 
       const blockedText = (reason: string): string => {
         if (config.blockedMessage !== undefined) {
@@ -555,13 +556,20 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
             artifact: { nace_verdict: verdict ? verdictSummary(verdict) : null },
           }),
       };
-      const result = await decision.apply(
-        gated,
-        handler as unknown as Handler<GatedToolCall>,
-        verdict,
-        context,
-      );
-      return result as Awaited<ReturnType<typeof handler>>;
+      try {
+        const result = await decision.apply(
+          gated,
+          handler as unknown as Handler<GatedToolCall>,
+          verdict,
+          context,
+        );
+        cache.delete(key);
+        return result as Awaited<ReturnType<typeof handler>>;
+      } catch (error) {
+        if (isGraphInterrupt(error)) cache.set(key, { decision, verdict });
+        else cache.delete(key);
+        throw error;
+      }
     },
   });
 }

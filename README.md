@@ -212,7 +212,7 @@ It answers three questions: a risk score, "destructive?" and "did the user ask f
   - Asking needs a checkpointer. Without one the call is blocked, and the message says so. Use `askHuman: false` to always block instead.
 - **If Drex can't answer, the call is blocked** (`onError: "block"`). A screenshot Drex can't read is dropped, and the check runs again without it.
 - **Everything is replaceable:** pass `questions`, `thresholdPolicy({ ... })`, or your own `(verdict) => GateDecision`.
-- **Resuming:** the gate keeps its first verdict in memory, so resuming asks Drex once. A resume in another process asks Drex again.
+- **Resuming:** a pending human-approval interrupt keeps its verdict in memory while the tool and decision context stay the same. Completed calls and changed context are checked again. A resume in another process asks Drex again.
 
 ### `naceModelRouterMiddleware`: the model picker
 
@@ -233,6 +233,8 @@ The router picks the model once per run. Below `minConfidence` (default 0.6), or
 | TypeSafe-compatible hosts | the host's System One root     | same request format as Nace                                                                |
 
 Every request sends `User-Agent` and `X-Nace-Client: langchain-nace-js/<version>`. On OpenRouter it also sends `HTTP-Referer` and `X-OpenRouter-Title`.
+
+Custom `defaultHeaders` are sent on requests but omitted from object inspection and serialized classifiers because they may contain credentials. Construct a new classifier with those headers when restoring a setup that needs them.
 
 ### Credentials and custom providers
 
@@ -259,6 +261,8 @@ If you used that configuration with real credentials, replace and revoke them;
 an upgrade cannot remove copies already received by another provider. Recreate
 and serialize custom-provider classifiers again: older saved manifests can
 still refer to `NACE_API_KEY`, even after upgrading.
+
+Malformed probabilities, confidence values or score rubrics raise `NaceAPIResponseValidationError`. The default tool-gate error policy blocks the call.
 
 ## Errors
 

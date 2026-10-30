@@ -297,18 +297,28 @@ function finite(value: unknown, field: string): number {
   return value;
 }
 
+function bounded(value: unknown, field: string, max = 1): number {
+  const number = finite(value, field);
+  if (number < 0 || number > max) {
+    throw new NaceAPIResponseValidationError(
+      `Drex returned an answer with an out-of-range \`${field}\`.`,
+    );
+  }
+  return number;
+}
+
 function numbers(value: unknown, field: string): Record<string, number> {
   const out: Record<string, number> = {};
   if (Array.isArray(value)) {
     value.forEach((p, i) => {
-      setOwn(out, String(i), finite(p, field));
+      setOwn(out, String(i), bounded(p, field));
     });
     return out;
   }
   if (!isRecord(value)) {
     throw new NaceAPIResponseValidationError(`Drex returned an answer without \`${field}\`.`);
   }
-  for (const [key, p] of Object.entries(value)) setOwn(out, key, finite(p, field));
+  for (const [key, p] of Object.entries(value)) setOwn(out, key, bounded(p, field));
   return out;
 }
 
@@ -317,7 +327,7 @@ function parseAnswer(raw: unknown): Answer | RawAnswer {
     throw new NaceAPIResponseValidationError("Drex returned an answer without a `type`.");
   }
   if (raw.type === "noul") {
-    return { type: "noul", noul: finite(raw.noul, "noul") };
+    return { type: "noul", noul: bounded(raw.noul, "noul") };
   }
   if (raw.type === "choice") {
     if (typeof raw.choice !== "string") {
@@ -327,7 +337,7 @@ function parseAnswer(raw: unknown): Answer | RawAnswer {
       type: "choice",
       choice: raw.choice,
       probabilities: numbers(raw.probabilities, "probabilities"),
-      confidence: finite(raw.confidence, "confidence"),
+      confidence: bounded(raw.confidence, "confidence"),
     };
   }
   if (raw.type === "score") {
@@ -339,12 +349,16 @@ function parseAnswer(raw: unknown): Answer | RawAnswer {
     } else if (isRecord(raw.legend)) {
       for (const [key, level] of Object.entries(raw.legend)) setOwn(legend, key, level);
     }
+    const levels = Object.keys(legend);
+    if (levels.length === 0 || levels.some((_, i) => !Object.hasOwn(legend, String(i)))) {
+      throw new NaceAPIResponseValidationError("Drex returned an invalid score legend.");
+    }
     return {
       type: "score",
-      score: finite(raw.score, "score"),
+      score: bounded(raw.score, "score", levels.length - 1),
       legend,
       probabilities: numbers(raw.probabilities, "probabilities"),
-      confidence: finite(raw.confidence, "confidence"),
+      confidence: bounded(raw.confidence, "confidence"),
     };
   }
   return { ...raw, type: raw.type };
@@ -357,7 +371,7 @@ function hide(target: object, key: string, get: () => unknown): void {
 function pick<T extends Answer>(answers: Record<string, Answer | RawAnswer>, type: T["type"]) {
   const out: Record<string, T> = {};
   for (const [id, answer] of Object.entries(answers)) {
-    if (answer.type === type) out[id] = answer as T;
+    if (answer.type === type) setOwn(out, id, answer);
   }
   return out;
 }

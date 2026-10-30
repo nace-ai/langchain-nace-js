@@ -2,6 +2,11 @@
 
 ## 0.1.1
 
+- Keep gate verdicts only for pending human-approval interruptions with unchanged decision context.
+- Exclude custom headers from inspection and serialization while preserving outgoing request headers.
+- Reject out-of-range probabilities, confidences and scores, and invalid score rubrics.
+- Preserve special answer IDs in typed response accessors.
+
 - Require explicit provider keys outside the production Nace HTTPS hosts; reject blank keys.
 - Pin the resolved destination in serialization and use provider-specific secret references.
 - Strip Vercel bypass headers for custom hosts and refuse HTTP redirects.

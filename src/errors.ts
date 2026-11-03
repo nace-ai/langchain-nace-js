@@ -1,5 +1,5 @@
 /**
- * Errors thrown by langchain-nace.
+ * Errors thrown by @nace-ai/langchain-nace.
  *
  * Every class extends LangChain's `LangChainError` and is brand-checked, so
  * `NaceRateLimitError.isInstance(error)` works even when two copies of the

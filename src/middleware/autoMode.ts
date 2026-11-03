@@ -537,7 +537,9 @@ export function naceAutoModeMiddleware(config: NaceAutoModeMiddlewareConfig = {}
     // A cancelled run stays cancelled; it isn't a Drex failure to block on.
     if (onError === "throw" || signal?.aborted) throw error;
     const name = isRecord(error) && typeof error.name === "string" ? error.name : "Error";
-    console.warn(`[langchain-nace] Drex could not check a tool call; blocking it (${name}).`);
+    console.warn(
+      `[@nace-ai/langchain-nace] Drex could not check a tool call; blocking it (${name}).`,
+    );
     return { decision: unchecked(name), name };
   }
 

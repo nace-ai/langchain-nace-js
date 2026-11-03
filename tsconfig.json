@@ -17,8 +17,8 @@
     "noEmit": true,
     "types": ["node"],
     "paths": {
-      "langchain-nace": ["./src/index.ts"],
-      "langchain-nace/middleware": ["./src/middleware/index.ts"]
+      "@nace-ai/langchain-nace": ["./src/index.ts"],
+      "@nace-ai/langchain-nace/middleware": ["./src/middleware/index.ts"]
     }
   },
   "include": ["src", "tests", "examples", "scripts", "*.config.ts"]

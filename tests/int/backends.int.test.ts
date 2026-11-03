@@ -78,7 +78,7 @@ describe.skipIf(!KEY)("uploaded files as images", () => {
     for (const color of ["red", "blue"]) {
       files[color] = await client.documents.upload(readFileSync(fixture(`${color}.png`)), {
         file_name: `${tag}-${color}.png`,
-        path: `langchain-nace-js-tests/${tag}-${color}.png`,
+        path: `nace-js-tests/${tag}-${color}.png`,
       });
     }
   });

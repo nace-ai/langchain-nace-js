@@ -2,6 +2,8 @@
 
 ## 0.1.1
 
+- Published as `@nace-ai/langchain-nace`; the unscoped `langchain-nace` package is deprecated.
+
 - Save each tool-gate decision in the agent's checkpoint (a `NaceGateDecision` task) and replay it on resume, on any worker, without asking Drex again. A pending approval no longer survives a change in the call, its context or the policy, and a lower-risk recheck can no longer bypass a pending rejection, including for custom decisions. Editing the paused state or resuming an earlier checkpoint makes the gate check the call again as a new call, and an answer that is already waiting blocks it instead of applying to a new decision. A custom `GateDecision` needs an `id` to be resumed after a pause. Screenshots are captured inside that task on a first run, so a failing screenshot source is a failed check like any other. With `onError: "throw"`, a failed check fails the run and retrying the run checks again; in runs with a `thread_id`, an outer middleware can't catch it and continue (without one, or outside a LangGraph run, the gate decides directly, and its error is an ordinary error). With `onError: "block"`, the block is saved and replayed. A resumed call whose screenshots can't be captured again is blocked. Put the gate before retry middleware, and don't call LangGraph tasks or interrupts from a `screenshots` function.
 - Test the oldest supported `@langchain/core`, `@langchain/langgraph` and `langchain` releases with a single copy of each.
 - Exclude custom headers from inspection and serialization while preserving outgoing request headers.
@@ -33,6 +35,6 @@ Before release, a review found and fixed: an API key printed by `console.log(rou
 - `NaceClassifier`: a Runnable that asks Drex typed questions (`noul`, `choice`, `score`) about text, JSON, LangChain messages and images, and returns full probabilities, usage and the request id. Default model `drex-max`.
 - Images on Drex Max from bytes, paths, base64, data URLs, LangChain image blocks and `nace-sdk` uploads; images inside messages (objects or `{ role, content }`) are moved to `images` as "Image N".
 - `NaceRouter` with `.branch()`, and `naceConditionalEdge` for LangGraph with a `human_review` fallback.
-- `langchain-nace/middleware`: `naceAutoModeMiddleware` (tool gate: risk, destructive, asked-for; block, ask a person, or allow; fails closed) and `naceModelRouterMiddleware` (one Drex choice per run; escalates when unsure or on errors).
+- `@nace-ai/langchain-nace/middleware`: `naceAutoModeMiddleware` (tool gate: risk, destructive, asked-for; block, ask a person, or allow; fails closed) and `naceModelRouterMiddleware` (one Drex choice per run; escalates when unsure or on errors).
 - Drop-in for `@langchain/typesafe`: same question objects, options, response fields, and middleware names (`autoModeMiddleware`, `modelRouterMiddleware`).
 - OpenRouter backend; attribution headers `User-Agent` and `X-Nace-Client: langchain-nace-js/<version>`.

@@ -208,7 +208,7 @@ export function naceModelRouterMiddleware(config: NaceModelRouterMiddlewareConfi
           // A cancelled run stays cancelled rather than escalating.
           if (signal?.aborted) throw error;
           const name = isRecord(error) && typeof error.name === "string" ? error.name : "Error";
-          console.warn(`[langchain-nace] Drex routing failed; escalating (${name}).`);
+          console.warn(`[@nace-ai/langchain-nace] Drex routing failed; escalating (${name}).`);
           break;
         }
       }

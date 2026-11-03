@@ -3,7 +3,7 @@
  * Install the package the way a user would and check it works.
  *
  *   node scripts/smoke-pack.mjs              # pack this checkout
- *   node scripts/smoke-pack.mjs --registry   # install langchain-nace@<version> from npm
+ *   node scripts/smoke-pack.mjs --registry   # install @nace-ai/langchain-nace@<version> from npm
  *
  * In a fresh temp project: installs the tarball (or the published version) with
  * its peers, imports it from ESM and CommonJS, type-checks a TypeScript user
@@ -19,7 +19,7 @@ const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const fromRegistry = process.argv.includes("--registry");
 const run = (cmd, args, cwd) => execFileSync(cmd, args, { cwd, stdio: "inherit" });
 
-const dir = mkdtempSync(join(tmpdir(), "langchain-nace-smoke-"));
+const dir = mkdtempSync(join(tmpdir(), "nace-smoke-"));
 let spec = `${pkg.name}@${pkg.version}`;
 if (!fromRegistry) {
   const out = execFileSync("npm", ["pack", "--pack-destination", dir, "--json"], { cwd: root });
@@ -51,8 +51,8 @@ const red = readFileSync(join(root, "tests/fixtures/red.png")).toString("base64"
 writeFileSync(
   join(dir, "esm.mjs"),
   `
-import { NaceClassifier, NaceError, VERSION } from "langchain-nace";
-import { naceAutoModeMiddleware, naceModelRouterMiddleware } from "langchain-nace/middleware";
+import { NaceClassifier, NaceError, VERSION } from "@nace-ai/langchain-nace";
+import { naceAutoModeMiddleware, naceModelRouterMiddleware } from "@nace-ai/langchain-nace/middleware";
 if (VERSION !== ${JSON.stringify(pkg.version)}) throw new Error("wrong version " + VERSION);
 if (typeof naceAutoModeMiddleware !== "function" || typeof naceModelRouterMiddleware !== "function") throw new Error("middleware missing");
 console.log("esm: imports ok", VERSION);
@@ -79,8 +79,8 @@ if (process.env.NACE_API_KEY) {
 writeFileSync(
   join(dir, "cjs.cjs"),
   `
-const { NaceClassifier, NaceRateLimitError } = require("langchain-nace");
-const { naceAutoModeMiddleware } = require("langchain-nace/middleware");
+const { NaceClassifier, NaceRateLimitError } = require("@nace-ai/langchain-nace");
+const { naceAutoModeMiddleware } = require("@nace-ai/langchain-nace/middleware");
 if (typeof NaceClassifier !== "function" || typeof NaceRateLimitError.isInstance !== "function") throw new Error("cjs exports missing");
 if (typeof naceAutoModeMiddleware !== "function") throw new Error("cjs middleware missing");
 console.log("cjs: imports ok");
@@ -90,8 +90,8 @@ console.log("cjs: imports ok");
 writeFileSync(
   join(dir, "user.ts"),
   `
-import { NaceClassifier, type ClassificationResponse, type Noul } from "langchain-nace";
-import { naceAutoModeMiddleware, type GateVerdict } from "langchain-nace/middleware";
+import { NaceClassifier, type ClassificationResponse, type Noul } from "@nace-ai/langchain-nace";
+import { naceAutoModeMiddleware, type GateVerdict } from "@nace-ai/langchain-nace/middleware";
 const q: Noul = { type: "noul", instructions: "Urgent?" };
 const c = new NaceClassifier({ questions: { q }, apiKey: "nace_sk_x" });
 const f = async (): Promise<number | undefined> => {

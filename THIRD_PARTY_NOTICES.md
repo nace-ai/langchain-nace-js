@@ -1,6 +1,6 @@
 # Third-party notices
 
-`langchain-nace` includes material adapted from the following package.
+`@nace-ai/langchain-nace` includes material adapted from the following package.
 
 ## @langchain/typesafe 0.0.2
 
@@ -8,7 +8,7 @@
 - Licence: MIT
 - Copyright: Copyright (c) LangChain, Inc.
 
-`langchain-nace` is a drop-in replacement for `@langchain/typesafe`, and keeps its API shape so that
+`@nace-ai/langchain-nace` is a drop-in replacement for `@langchain/typesafe`, and keeps its API shape so that
 existing code only needs new imports and an API key. The following material was adapted from it:
 
 - Doc comments reproduced word for word from its type declarations:

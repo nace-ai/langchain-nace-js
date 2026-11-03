@@ -1,4 +1,4 @@
-# langchain-nace (JS) design
+# @nace-ai/langchain-nace (JS) design
 
 The JavaScript/TypeScript counterpart of the Python [`langchain-nace`](https://pypi.org/project/langchain-nace/): same behaviour and wire format, in LangChain.js's shape. API compatibility with `@langchain/typesafe` is a requirement: switching is an import change.
 
@@ -16,7 +16,7 @@ The JavaScript/TypeScript counterpart of the Python [`langchain-nace`](https://p
 ```mermaid
 flowchart TB
     APP["Your code: LCEL / LangGraph / createAgent"]
-    subgraph Pkg["langchain-nace"]
+    subgraph Pkg["@nace-ai/langchain-nace"]
         NC["NaceClassifier (Runnable: invoke / batch)"]
         NR["NaceRouter .branch()"]
         NE["naceConditionalEdge (LangGraph path)"]
@@ -27,7 +27,7 @@ flowchart TB
     end
     subgraph SDK["nace-sdk"]
         CL["NaceClient: retries 408/429/5xx/529 with retry-after-ms, 60 s per attempt, no total retry budget"]
-        FX["fetch wrapper: User-Agent = langchain-nace-js/version<br/>clientInfo: X-Nace-Client"]
+        FX["fetch wrapper: User-Agent = @nace-ai/langchain-nace/version<br/>clientInfo: X-Nace-Client"]
     end
     NACE["console.nace.ai/v1/systemone"]
     ORT["openrouter.ai/api/v1/systemone"]

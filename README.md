@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/langchain-nace"><img alt="npm" src="https://img.shields.io/npm/v/langchain-nace?logo=npm&color=cb3837"></a>
+  <a href="https://www.npmjs.com/package/@nace-ai/langchain-nace"><img alt="npm" src="https://img.shields.io/npm/v/@nace-ai/langchain-nace?logo=npm&color=cb3837"></a>
   <a href="https://github.com/nace-ai/langchain-nace-js/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/nace-ai/langchain-nace-js/ci.yml?branch=main&label=CI&logo=github"></a>
   <a href="https://github.com/nace-ai/langchain-nace-js/actions/workflows/live.yml"><img alt="Live contract" src="https://img.shields.io/github/actions/workflow/status/nace-ai/langchain-nace-js/live.yml?branch=main&label=live%20contract&logo=github"></a>
   <img alt="Node 20+" src="https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white">
@@ -37,8 +37,8 @@
 ## Install
 
 ```bash
-npm install langchain-nace @langchain/core
-npm install langchain @langchain/langgraph   # only for langchain-nace/middleware
+npm install @nace-ai/langchain-nace @langchain/core
+npm install langchain @langchain/langgraph   # only for @nace-ai/langchain-nace/middleware
 export NACE_API_KEY=nace_sk_...
 ```
 
@@ -48,12 +48,12 @@ Use 0.1.1 or later. Version 0.1.0 was withdrawn from npm.
 - **Peers:** `@langchain/core` ≥ 1.2.16; for the middleware, `langchain` ≥ 1.3.0 and `@langchain/langgraph`.
 - **One copy of `@langchain/core` and `@langchain/langgraph`.** If your package manager installs two, add `overrides`/`resolutions`. With two copies, a `Command` from one isn't recognized by agents built on the other, so resuming after a person answers fails.
 
-Looking for Python? The package of the same name is on [PyPI](https://pypi.org/project/langchain-nace/).
+Looking for Python? The `langchain-nace` package is on [PyPI](https://pypi.org/project/langchain-nace/).
 
 ## Quickstart
 
 ```ts
-import { NaceClassifier } from "langchain-nace";
+import { NaceClassifier } from "@nace-ai/langchain-nace";
 
 const classifier = new NaceClassifier({
   // model: "drex-max" by default
@@ -96,11 +96,11 @@ Change the imports and set `NACE_API_KEY`. Question objects, constructor options
 ```diff
 - import { TypeSafeClassifier } from "@langchain/typesafe";
 - import { autoModeMiddleware, modelRouterMiddleware } from "@langchain/typesafe/middleware";
-+ import { NaceClassifier } from "langchain-nace";
-+ import { autoModeMiddleware, modelRouterMiddleware } from "langchain-nace/middleware";
++ import { NaceClassifier } from "@nace-ai/langchain-nace";
++ import { autoModeMiddleware, modelRouterMiddleware } from "@nace-ai/langchain-nace/middleware";
 ```
 
-| `@langchain/typesafe`                                                                                                  | `langchain-nace`                                              |
+| `@langchain/typesafe`                                                                                                  | `@nace-ai/langchain-nace`                                     |
 | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
 | `TypeSafeClassifier`                                                                                                   | `NaceClassifier` (default model `drex-max`)                   |
 | question objects; `Noul`, `Choice`, `Score`                                                                            | the same                                                      |
@@ -156,7 +156,7 @@ await damage.invoke("Two product photos.", {
 ## Routing
 
 ```ts
-import { NaceRouter } from "langchain-nace";
+import { NaceRouter } from "@nace-ai/langchain-nace";
 
 const router = new NaceRouter({
   question: {
@@ -181,7 +181,10 @@ const chain = router.branch(
 ```ts
 import { MemorySaver } from "@langchain/langgraph";
 import { createAgent } from "langchain";
-import { naceAutoModeMiddleware, naceModelRouterMiddleware } from "langchain-nace/middleware";
+import {
+  naceAutoModeMiddleware,
+  naceModelRouterMiddleware,
+} from "@nace-ai/langchain-nace/middleware";
 
 const router = naceModelRouterMiddleware({
   choices: {

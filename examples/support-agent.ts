@@ -23,14 +23,14 @@ import { AIMessage, type BaseMessage, HumanMessage, ToolMessage } from "@langcha
 import type { ChatResult } from "@langchain/core/outputs";
 import { tool } from "@langchain/core/tools";
 import { Command, MemorySaver } from "@langchain/langgraph";
-import { createAgent, initChatModel } from "langchain";
-import { NaceClassifier } from "langchain-nace";
+import { NaceClassifier } from "@nace-ai/langchain-nace";
 import {
   type NaceModelRoute,
   naceAutoModeMiddleware,
   naceModelRouterMiddleware,
   type ToolApprovalRequest,
-} from "langchain-nace/middleware";
+} from "@nace-ai/langchain-nace/middleware";
+import { createAgent, initChatModel } from "langchain";
 import * as z from "zod/v4";
 
 const SCREENS = new URL("../tests/fixtures/screens/", import.meta.url);

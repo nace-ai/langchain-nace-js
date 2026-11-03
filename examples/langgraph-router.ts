@@ -18,7 +18,7 @@ import {
   StateGraph,
 } from "@langchain/langgraph";
 
-import { type Choice, naceConditionalEdge } from "langchain-nace";
+import { type Choice, naceConditionalEdge } from "@nace-ai/langchain-nace";
 
 const TEAMS: Choice = {
   type: "choice",

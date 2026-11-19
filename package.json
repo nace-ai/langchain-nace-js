@@ -1,7 +1,7 @@
 {
   "name": "@nace-ai/langchain-nace",
   "version": "0.1.1",
-  "description": "LangChain.js integration for Drex decision models by Nace: a classifier, a router, and agent middleware for model routing and tool gating.",
+  "description": "LangChain.js integration for Drex decision models and Nace Document Intelligence: a classifier, a router, agent middleware, a document loader and document tools.",
   "license": "MIT",
   "author": "Nace",
   "homepage": "https://github.com/nace-ai/langchain-nace-js#readme",
@@ -18,7 +18,9 @@
     "decision-model",
     "classifier",
     "agent-middleware",
-    "tool-gating"
+    "tool-gating",
+    "document-loader",
+    "extraction"
   ],
   "type": "module",
   "engines": {

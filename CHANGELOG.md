@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- NDI (Nace Document Intelligence): `NaceDocumentLoader` (parse a URL, local file or bytes into Markdown `Document`s, whole or chunked by page or section), `NaceExtractTool` (extract JSON-Schema fields from a document, with each field's status, confidence and quoted source text) and `NaceSearchTool` (answer a question over an ingested workspace, with the answer, its confidence and its evidence). The three components share the classifier's credential rules (never OpenRouter), delete the job they create and the file they upload after the read, and are server-side only.
+
 ## 0.1.1
 
 - Published as `@nace-ai/langchain-nace`; the unscoped `langchain-nace` package is deprecated.

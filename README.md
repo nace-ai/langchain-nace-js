@@ -28,11 +28,14 @@
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 🧭 **`NaceClassifier`**                     | A Runnable that answers many questions about one state in a single request, with full probabilities, usage and a request id.                                    |
 | 🔀 **`NaceRouter` / `naceConditionalEdge`** | Route LCEL chains and LangGraph graphs on Drex's choice; send unsure cases to a person.                                                                         |
+| 📄 **`NaceDocumentLoader`**                 | Parse a document (URL, local file or bytes) into Markdown `Document`s, whole or chunked by page or section, with NDI.                                           |
+| 🧾 **`NaceExtractTool`**                    | Extract JSON-Schema fields from a document; each field comes with its status, confidence and quoted source text.                                                |
+| 🔎 **`NaceSearchTool`**                     | Answer a question over an ingested workspace's files, with the answer, its confidence and the evidence it cites.                                                |
 | 🛡️ **`naceAutoModeMiddleware`**             | Check every tool call before it runs: allow, ask a person, or block. Remembers the user's original request, reads screenshots, and blocks if Drex can't answer. |
 | 💸 **`naceModelRouterMiddleware`**          | Pick the cheapest chat model that can handle each run; escalate when unsure.                                                                                    |
 | 🔁 **Drop-in for `@langchain/typesafe`**    | Change the imports and the API key; your code keeps working.                                                                                                    |
 
-**Contents:** [Install](#install) · [Quickstart](#quickstart) · [Switching from TypeSafe](#switching-from-langchaintypesafe) · [Models](#models) · [Images](#images-drex-max) · [Routing](#routing) · [Agent middleware](#agent-middleware-experimental) · [Backends](#backends) · [Errors](#errors) · [Tracing](#tracing) · [Development](#development)
+**Contents:** [Install](#install) · [Quickstart](#quickstart) · [Switching from TypeSafe](#switching-from-langchaintypesafe) · [Models](#models) · [Images](#images-drex-max) · [Routing](#routing) · [Documents (NDI)](#documents-ndi) · [Agent middleware](#agent-middleware-experimental) · [Backends](#backends) · [Errors](#errors) · [Tracing](#tracing) · [Development](#development)
 
 ## Install
 
@@ -175,6 +178,64 @@ const chain = router.branch(
 ```
 
 **LangGraph:** `naceConditionalEdge({ question, state, minConfidence: 0.7 })` is a path function for `addConditionalEdges`. Below the threshold it returns `"human_review"`, so that node can `interrupt()` for a person. See [`examples/langgraph-router.ts`](https://github.com/nace-ai/langchain-nace-js/blob/main/examples/langgraph-router.ts).
+
+## Documents (NDI)
+
+**NDI** is Nace Document Intelligence: the cloud service that parses, extracts and answers questions over documents. The three components below run in the same process as the classifier, read the same `NACE_API_KEY`, and follow the same rules as [Credentials and custom providers](#credentials-and-custom-providers).
+
+```ts
+import { NaceDocumentLoader } from "@nace-ai/langchain-nace";
+
+const loader = new NaceDocumentLoader({
+  source: "https://example.com/invoice.pdf", // or a local path, or bytes
+  chunking: "page", // "none" (default), "page" or "section"
+});
+const documents = await loader.load(); // Document[] with Markdown and metadata
+```
+
+```ts
+import { NaceExtractTool } from "@nace-ai/langchain-nace";
+
+const extract = new NaceExtractTool({
+  extractionSchema: {
+    type: "object",
+    properties: { invoice_number: { type: "string" }, total: { type: "number" } },
+  },
+  instructions: "Extract the invoice fields.",
+});
+const message = await extract.invoke({
+  name: "nace_extract",
+  args: { source: "https://example.com/invoice.pdf" },
+  id: "call_1",
+  type: "tool_call",
+});
+const { data, fields } = JSON.parse(message.content as string);
+message.artifact; // the raw NDI result
+```
+
+```ts
+import { NaceSearchTool } from "@nace-ai/langchain-nace";
+
+const search = new NaceSearchTool({ workspaceId: "<an ingested workspace's id>" });
+const message = await search.invoke({
+  name: "nace_search",
+  args: { query: "What is the total due on the last invoice?" },
+  id: "call_2",
+  type: "tool_call",
+});
+const { answer, confidence, evidences } = JSON.parse(message.content as string);
+```
+
+- **Server side only.** The `/v1` routes send no CORS headers, so the components do not work in a browser page.
+- **Clean-up.** The loader and the extract tool delete the uploaded file and the job after the read; the search tool deletes its job. A failed clean-up gives a `console.warn`, not an error.
+- **Uploads.** A local file or bytes go straight to the document service with an upload token. That request has the upload token and the `User-Agent` header, but not the API key and not `X-Nace-Client`.
+- **`allowLocalFiles` is off by default** because the model controls the tool input.
+- **The extraction schema is a JSON Schema subset** (no `$ref`, `anyOf`, `format`).
+- **Parse output and search answers are untrusted data:** they can repeat instructions that are in a document.
+- **Large results.** A document result over 1 MiB is read in full; a workbook result over 1 MiB is refused with an error that says to parse fewer sheets or pages.
+- **Zero-retention accounts:** use URL sources (NDI refuses uploads without a workspace bound to the account's own storage).
+- **There is no retriever.** Automatic search returns one generated answer and the quotes it cites, not the passages that match a query; a retriever made from its evidences would give a second LLM a partial context and hide the answer NDI already made. A tool gives the agent the answer and the evidence together.
+- **NDI is not available through OpenRouter.** The rules of "Credentials and custom providers" apply.
 
 ## Agent middleware (experimental)
 

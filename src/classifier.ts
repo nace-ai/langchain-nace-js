@@ -55,12 +55,12 @@ export function isTextOnly(model: string): boolean {
 }
 
 /** An env var, with an empty or blank value read as unset. */
-function env(name: string): string | undefined {
+export function env(name: string): string | undefined {
   const value = getEnvironmentVariable(name)?.trim();
   return value ? value : undefined;
 }
 
-function isOpenRouter(baseUrl: string): boolean {
+export function isOpenRouter(baseUrl: string): boolean {
   try {
     return new URL(baseUrl).hostname.replace(/\.$/, "") === "openrouter.ai";
   } catch {
@@ -70,7 +70,7 @@ function isOpenRouter(baseUrl: string): boolean {
 
 const NACE_HOSTS = new Set(["console.nace.ai", "drex.nace.ai"]);
 
-function isNaceDestination(baseUrl: string): boolean {
+export function isNaceDestination(baseUrl: string): boolean {
   try {
     const url = new URL(baseUrl);
     return (
@@ -85,7 +85,7 @@ function isNaceDestination(baseUrl: string): boolean {
   }
 }
 
-function hasUserinfo(baseUrl: string): boolean {
+export function hasUserinfo(baseUrl: string): boolean {
   try {
     const url = new URL(baseUrl);
     return url.username !== "" || url.password !== "";
@@ -101,7 +101,7 @@ function hasUserinfo(baseUrl: string): boolean {
  * came from the environment (`NACE_BASE_URL`, e.g. on-prem). A custom `baseUrl`
  * passed in code needs its own `apiKey`.
  */
-function resolveApiKey(
+export function resolveApiKey(
   explicit: string | undefined,
   baseUrl: string,
   explicitBaseUrl: boolean,
@@ -136,6 +136,23 @@ function providerHeaders(baseUrl: string, headers?: HeadersInit): Headers {
     result.delete("x-vercel-set-bypass-cookie");
   }
   return result;
+}
+
+/**
+ * Sets the attribution `User-Agent`, drops Vercel bypass headers for other hosts, refuses redirects.
+ */
+export function attributedFetch(
+  inner: typeof fetch,
+): (input: string, init?: RequestInit) => Promise<Response> {
+  // nace-sdk sets `User-Agent: nace-sdk/<version>` after merging our headers,
+  // so the attribution `User-Agent` is set here, on the way out.
+  return (input, init) => {
+    const outgoing = providerHeaders(input, init?.headers);
+    outgoing.set("User-Agent", CLIENT_NAME);
+    // Do not let fetch forward provider-specific headers through a redirect.
+    // Use the final API URL explicitly instead.
+    return inner(input, { ...init, headers: outgoing, redirect: "error" });
+  };
 }
 
 export interface NaceClassifierFields {
@@ -323,15 +340,9 @@ export class NaceClassifier extends Runnable<
     // Looked up at call time, so a later `vi.spyOn(globalThis, "fetch")` or a
     // polyfill installed after construction is still used.
     const inner = fields.fetch ?? ((input, init) => globalThis.fetch(input, init));
-    // nace-sdk sets `User-Agent: nace-sdk/<version>` after merging our headers,
-    // so the attribution `User-Agent` is set here, on the way out.
-    const withUserAgent = (input: string, init?: RequestInit) => {
-      const outgoing = providerHeaders(input, init?.headers);
-      outgoing.set("User-Agent", CLIENT_NAME);
-      // Do not let fetch forward provider-specific headers through a redirect.
-      // Use the final API URL explicitly instead.
-      return inner(input, { ...init, headers: outgoing, redirect: "error" });
-    };
+    // The attribution `User-Agent` and the redirect refusal live in
+    // `attributedFetch`, on the way out of the SDK.
+    const withUserAgent = attributedFetch(inner);
 
     let client: NaceClient;
     try {

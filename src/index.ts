@@ -30,6 +30,14 @@ export {
 } from "./errors.js";
 export { type NaceConditionalEdgeOptions, naceConditionalEdge } from "./graph.js";
 export { asDataUrl, type ImageLike, toDrexImage } from "./images.js";
+export type { NaceNdiFields } from "./ndi/client.js";
+export { NaceDocumentLoader, type NaceDocumentLoaderFields } from "./ndi/loader.js";
+export {
+  NaceExtractTool,
+  type NaceExtractToolFields,
+  NaceSearchTool,
+  type NaceSearchToolFields,
+} from "./ndi/tools.js";
 export {
   NaceLowConfidenceError,
   NaceRouter,

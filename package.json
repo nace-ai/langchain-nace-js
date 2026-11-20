@@ -1,6 +1,6 @@
 {
   "name": "@nace-ai/langchain-nace",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "LangChain.js integration for Drex decision models and Nace Document Intelligence: a classifier, a router, agent middleware, a document loader and document tools.",
   "license": "MIT",
   "author": "Nace",

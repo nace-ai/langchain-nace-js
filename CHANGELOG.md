@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - NDI (Nace Document Intelligence): `NaceDocumentLoader` (parse a URL, local file or bytes into Markdown `Document`s, whole or chunked by page or section), `NaceExtractTool` (extract JSON-Schema fields from a document, with each field's status, confidence and quoted source text) and `NaceSearchTool` (answer a question over an ingested workspace, with the answer, its confidence and its evidence). The three components share the classifier's credential rules (never OpenRouter), delete the job they create and the file they upload after the read, and are server-side only.
 - NDI review fixes: an error message that echoes the API key or repeats a signed source URL is scrubbed on the raised error and its whole cause chain, and the loader's `source` metadata keeps a URL without its query; the configured `timeout` bounds the whole job, so a poll or a content download that outlasts it fails with `NaceAPITimeoutError` instead of returning late or hanging (the deadline is best-effort: a request in flight, an SDK retry or the clean-up delete can still run slightly past it); a create that ends in `503 job_pending` raises an error that carries the request's `idempotencyKey`, so a retry resumes the job instead of starting a second one; a parse asked for `text` returns that text instead of an empty document, and a result with neither markdown nor text fails loudly; a search whose agent ran out of steps reports `exhausted: true` in the tool's content, because that answer is partial.

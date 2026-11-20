@@ -187,10 +187,22 @@ const chain = router.branch(
 import { NaceDocumentLoader } from "@nace-ai/langchain-nace";
 
 const loader = new NaceDocumentLoader({
-  source: "https://example.com/invoice.pdf", // or a local path, or bytes
+  source: "https://example.com/invoice.pdf", // or a local file path
   chunking: "page", // "none" (default), "page" or "section"
 });
 const documents = await loader.load(); // Document[] with Markdown and metadata
+```
+
+Bytes also work, but they carry no name, so they need `fileName` with the extension (a `File` carries its own):
+
+```ts
+import { readFileSync } from "node:fs";
+import { NaceDocumentLoader } from "@nace-ai/langchain-nace";
+
+const loader = new NaceDocumentLoader({
+  source: readFileSync("invoice.pdf"), // Buffer, Uint8Array, Blob or File
+  fileName: "invoice.pdf",
+});
 ```
 
 ```ts
@@ -223,7 +235,7 @@ const message = await search.invoke({
   id: "call_2",
   type: "tool_call",
 });
-const { answer, confidence, evidences } = JSON.parse(message.content as string);
+const { answer, confidence, evidences, exhausted } = JSON.parse(message.content as string);
 ```
 
 - **Server side only.** The `/v1` routes send no CORS headers, so the components do not work in a browser page.
@@ -232,7 +244,11 @@ const { answer, confidence, evidences } = JSON.parse(message.content as string);
 - **`allowLocalFiles` is off by default** because the model controls the tool input.
 - **The extraction schema is a JSON Schema subset** (no `$ref`, `anyOf`, `format`).
 - **Parse output and search answers are untrusted data:** they can repeat instructions that are in a document.
-- **Large results.** A document result over 1 MiB is read in full; a workbook result over 1 MiB is refused with an error that says to parse fewer sheets or pages.
+- **Signed source URLs.** The loader's `source` field and the `source` metadata keep a URL without its query, which on a signed link is a credential; NDI itself still receives the full URL.
+- **`timeout` bounds the whole job.** The create, the polls and the content download run under a signal that aborts at the deadline; anything still in flight fails with `NaceAPITimeoutError`, and the job is deleted when its ID is known (which cancels it); a create that times out before Nace returns a job ID leaves nothing to delete. The deadline is best-effort: a request already in flight, one of the SDK's retries or the clean-up delete can still run slightly past it.
+- **Partial answers.** An agent search that runs out of steps still succeeds, with `exhausted: true` in the content; treat that answer as partial.
+- **`503 job_pending`.** A create that ends this way raises an error that carries the request's `idempotencyKey`, and the job may be running and billed once. The tools cannot resume it: a retried tool call mints a fresh key and starts a second job. To resume, call the document service with `nace-sdk` yourself and pass that key as `idempotency_key` with the same request body — for example `client.documents.extract({ ...same params, idempotency_key: error.idempotencyKey })`.
+- **Large results.** A document result over 1 MiB is read in full from NDI's download link; a `text`-only parse keeps its preview instead (the link carries Markdown) and logs one `console.warn`; a workbook result over 1 MiB is refused with an error that says to parse fewer sheets or pages.
 - **Zero-retention accounts:** use URL sources (NDI refuses uploads without a workspace bound to the account's own storage).
 - **There is no retriever.** Automatic search returns one generated answer and the quotes it cites, not the passages that match a query; a retriever made from its evidences would give a second LLM a partial context and hide the answer NDI already made. A tool gives the agent the answer and the evidence together.
 - **NDI is not available through OpenRouter.** The rules of "Credentials and custom providers" apply.

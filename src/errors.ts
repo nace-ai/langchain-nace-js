@@ -83,6 +83,13 @@ export class NaceAPIError extends ns.brand(NaceError, "api") {
   /** Drex's request id; quote it in support requests. */
   readonly requestId: string | undefined;
 
+  /**
+   * The `Idempotency-Key` the failed request carried, when it carried one.
+   * After a `503 job_pending` on a document create, resend the same body with
+   * this key to resume the job instead of starting another.
+   */
+  readonly idempotencyKey: string | undefined;
+
   /** The class of failure Drex reports, such as `invalid_request_error`. */
   readonly type: string | undefined;
 
@@ -103,6 +110,7 @@ export class NaceAPIError extends ns.brand(NaceError, "api") {
     fields: {
       status: number;
       requestId?: string | undefined;
+      idempotencyKey?: string | undefined;
       type?: string | undefined;
       issues?: Issue[];
       body?: unknown;
@@ -113,6 +121,7 @@ export class NaceAPIError extends ns.brand(NaceError, "api") {
     super(message, { cause: fields.cause });
     this.status = fields.status;
     this.requestId = fields.requestId;
+    this.idempotencyKey = fields.idempotencyKey;
     this.type = fields.type;
     defineHidden(this, "issues", fields.issues ?? []);
     defineHidden(this, "body", fields.body);
@@ -385,6 +394,7 @@ export function convertError(error: unknown, provider = "Drex"): unknown {
     const converted = new Class(text, {
       status,
       requestId,
+      idempotencyKey: error.idempotencyKey,
       type: boundedType(error.type),
       issues,
       body: error.body,

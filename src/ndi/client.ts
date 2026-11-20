@@ -73,9 +73,39 @@ function urlFileName(url: string): string {
   return segment;
 }
 
-/** Drops the query and fragment of every URL in a text: a signed link's query is a credential. */
-function stripUrlQueries(text: string): string {
-  return text.replace(/(https?:\/\/[^\s?#]+)[?#]\S*/gi, "$1");
+/**
+ * A URL without the parts that can hold a credential: the query, the fragment,
+ * the user name and the password. Parsed with the URL class, so a path with
+ * spaces or other unusual characters is still redacted (and comes back
+ * percent-encoded). The scheme keeps the case it was written with.
+ */
+export function redactUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.search = "";
+    parsed.hash = "";
+    parsed.username = "";
+    parsed.password = "";
+    const shown = parsed.toString();
+    // The URL class lowercases the scheme; keep it as the caller wrote it.
+    const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.exec(url)?.[0];
+    return scheme === undefined ? shown : scheme + shown.slice(scheme.length);
+  } catch {
+    // Not a parseable URL: still cut at the first query or fragment.
+    return url.split(/[?#]/)[0] ?? url;
+  }
+}
+
+/**
+ * Drops the query and fragment of every URL in a text: a signed link's query
+ * is a credential. A URL can hold spaces in its path, so a run may span spaces
+ * (it never reaches a second URL) and must end at its query or fragment; each
+ * URL found is redacted with the URL class, in `redactUrl`.
+ */
+export function stripUrlQueries(text: string): string {
+  return text.replace(/https?:\/\/[^\s?#]+(?:\s(?!https?:\/\/)[^\s?#]+)*[?#]\S*/gi, (matched) =>
+    redactUrl(matched),
+  );
 }
 
 /** The NDI error for a job that did not succeed: kind, id, status and why. */
@@ -100,6 +130,9 @@ export class NdiClient {
   readonly timeout: number;
 
   readonly #client: NaceClient;
+
+  // Kept for the error scrub only; a private field never reaches serialization.
+  readonly #apiKey: string;
 
   constructor(fields: NaceNdiFields = {}) {
     const explicitBaseUrl = fields.baseUrl?.trim() || undefined;
@@ -141,6 +174,7 @@ export class NdiClient {
       throw error;
     }
     this.#client = client;
+    this.#apiKey = apiKey;
   }
 
   /** Runs one SDK call and converts its errors. */
@@ -149,11 +183,15 @@ export class NdiClient {
       return await fn(this.#client);
     } catch (error) {
       const converted = convertError(error, NDI);
-      // NDI can repeat a source URL; the query of a signed link is a
-      // credential. Scrub it on the error and its whole cause chain.
+      // NDI can repeat a source URL, and a provider can echo the key it was
+      // sent: the query of a signed link and the key itself are credentials.
+      // Scrub both on the error and its whole cause chain.
+      const key = this.#apiKey;
+      const scrub = (text: string): string =>
+        stripUrlQueries(key ? text.split(key).join("***") : text);
       let level: unknown = converted;
       for (let depth = 0; depth < 5 && level instanceof Error; depth += 1) {
-        const scrubbed = stripUrlQueries(level.message);
+        const scrubbed = scrub(level.message);
         if (scrubbed !== level.message) {
           try {
             // A plain assignment would throw on a getter-only message (a
@@ -218,22 +256,42 @@ export class NdiClient {
 
   /**
    * Creates a job, waits for it, gives the finished job to `use`. Deletes the job
-   * after `use` (also after an error or a timeout).
+   * after `use` (also after an error or a timeout). The create and the polls run
+   * under a signal that aborts at the deadline, `started + timeout`, which `use`
+   * also receives for calls that must not outlive it.
    */
   async withJob<T>(
-    create: (client: NaceClient, waitSeconds: number) => Promise<DocumentJob>,
+    create: (client: NaceClient, waitSeconds: number, signal: AbortSignal) => Promise<DocumentJob>,
     options: { signal?: AbortSignal },
-    use: (job: DocumentJob) => Promise<T>,
+    use: (job: DocumentJob, deadline: number) => Promise<T>,
   ): Promise<T> {
     const started = Date.now();
+    const deadline = started + this.timeout;
     // Never `wait_seconds: 0`: zero-retention accounts refuse it, and they give
     // the result only in the create response.
     const waitSeconds = Math.max(1, Math.min(60, Math.floor(this.timeout / 1000)));
     let jobId: string | undefined;
+    // The deadline is also a signal: it stops the create and the polls at the
+    // configured timeout, the request in flight included, and no poll starts
+    // after it. The caller's signal aborts it too; the clean-up delete never
+    // carries it, so a job that outlived the deadline is still cancelled.
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.timeout);
+    const caller = options.signal;
+    const onCallerAbort = () => controller.abort();
+    if (caller !== undefined) {
+      if (caller.aborted) controller.abort();
+      else caller.addEventListener("abort", onCallerAbort);
+    }
+    const signal = controller.signal;
     try {
       let job: DocumentJob;
       try {
-        job = await this.call((client) => create(client, waitSeconds));
+        job = await this.call((client) => create(client, waitSeconds, signal));
       } catch (error) {
         // A refused create keeps the request and the error under an id in this
         // header; NDI's docs say to delete that id like any job.
@@ -249,14 +307,10 @@ export class NdiClient {
         const left = Math.max(1, this.timeout - (Date.now() - started));
         job = await this.call((client) =>
           client.jobs
-            .wait(id, { timeout: left, raiseOnFailure: false, signal: options.signal })
+            .wait(id, { timeout: left, raiseOnFailure: false, signal })
             .catch((error: unknown) => {
               if (error instanceof JobTimeoutError) {
-                const timeout = new NaceAPITimeoutError(
-                  `The NDI job ${id} did not finish in ${this.timeout} ms.`,
-                );
-                timeout.timeoutMs = this.timeout;
-                throw timeout;
+                throw this.#jobTimeout(id);
               }
               throw error;
             }),
@@ -274,8 +328,20 @@ export class NdiClient {
             "parse fewer pages or use a smaller document.",
         );
       }
-      return await use(job);
+      if (Date.now() > deadline) {
+        // The SDK's wait checks its deadline only after each poll, so a result
+        // that arrives after it still returns. The configured `timeout` bounds
+        // the whole operation, a late result included.
+        throw this.#jobTimeout(job.job_id);
+      }
+      return await use(job, deadline);
+    } catch (error) {
+      // The deadline stopped the request in flight: that abort is this timeout.
+      if (timedOut) throw this.#jobTimeout(jobId);
+      throw error;
     } finally {
+      clearTimeout(timer);
+      caller?.removeEventListener("abort", onCallerAbort);
       const id = jobId;
       if (id !== undefined) {
         // A delete also cancels a job that still runs. A clean-up failure must
@@ -287,6 +353,46 @@ export class NdiClient {
         }
       }
     }
+  }
+
+  /**
+   * Downloads one of a job's files (the full content of a truncated parse),
+   * bounded by the deadline of the whole operation: the SDK's download holds no
+   * deadline of its own, and a body that never ends would hang the read.
+   */
+  async download(jobId: string, path: string, deadline: number): Promise<Uint8Array> {
+    const left = deadline - Date.now();
+    if (left <= 0) throw this.#jobTimeout(jobId);
+    const controller = new AbortController();
+    let end: () => void = () => {};
+    // The abort frees the request; the race ends the wait even when a body
+    // that never ends ignores the abort.
+    const late = new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => {
+        controller.abort();
+        reject(this.#jobTimeout(jobId));
+      }, left);
+      end = () => clearTimeout(timer);
+    });
+    const read = this.call((client) =>
+      client.jobs.download(jobId, path, { signal: controller.signal }),
+    );
+    // A rejection that lands after the deadline ended the read must not go
+    // unhandled.
+    read.catch(() => {});
+    try {
+      return await Promise.race([read, late]);
+    } finally {
+      end();
+    }
+  }
+
+  /** The NDI timeout error for a job (or its create) that ran past the configured `timeout`. */
+  #jobTimeout(jobId: string | undefined): NaceAPITimeoutError {
+    const who = jobId === undefined ? "create" : `job ${jobId}`;
+    const error = new NaceAPITimeoutError(`The NDI ${who} did not finish in ${this.timeout} ms.`);
+    error.timeoutMs = this.timeout;
+    return error;
   }
 
   /** Uploads bytes and gives `use` the workspace file, deleting it afterwards. */

@@ -121,7 +121,9 @@ export class NaceExtractTool extends StructuredTool<ExtractInput> {
       { workspaceId: this.workspaceId, signal },
       (source) =>
         this.#client.withJob(
-          (client, waitSeconds) => {
+          // The signal aborts at the job's deadline (the caller's signal is
+          // forwarded onto it), so the create stops with the operation.
+          (client, waitSeconds, signal) => {
             const params: ExtractParams = {
               source,
               schema: this.extractionSchema,
@@ -176,7 +178,8 @@ const SEARCH_DESCRIPTION =
 /**
  * A tool that answers a question over the ingested files of one Nace workspace
  * with NDI automatic search. The content is a JSON string `{ answer, confidence,
- * evidences }`; the artifact is the raw NDI result.
+ * evidences, exhausted }`: `exhausted` is `true` when the agent ran out of
+ * steps and the answer is partial; the artifact is the raw NDI result.
  *
  * @example
  * ```ts
@@ -187,7 +190,7 @@ const SEARCH_DESCRIPTION =
  *   id: "call_1",
  *   type: "tool_call",
  * });
- * const { answer, evidences } = JSON.parse(message.content as string);
+ * const { answer, evidences, exhausted } = JSON.parse(message.content as string);
  * ```
  */
 export class NaceSearchTool extends StructuredTool<typeof SEARCH_INPUT> {
@@ -228,7 +231,9 @@ export class NaceSearchTool extends StructuredTool<typeof SEARCH_INPUT> {
   ): Promise<[string, unknown]> {
     const signal = parentConfig?.signal;
     return this.#client.withJob(
-      (client, waitSeconds) => {
+      // The signal aborts at the job's deadline (the caller's signal is
+      // forwarded onto it), so the create stops with the operation.
+      (client, waitSeconds, signal) => {
         const params: {
           query: string;
           wait_seconds: number;
@@ -251,6 +256,8 @@ export class NaceSearchTool extends StructuredTool<typeof SEARCH_INPUT> {
           JSON.stringify({
             answer: answer.answer ?? null,
             confidence: answer.confidence ?? null,
+            // `true` when the agent ran out of steps: the answer is partial.
+            exhausted: answer.exhausted === true,
             evidences: evidences
               .filter((evidence): evidence is Record<string, unknown> => isRecord(evidence))
               .map((evidence) => ({

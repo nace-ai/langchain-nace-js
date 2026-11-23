@@ -25,6 +25,7 @@ import {
   NaceModelSelector,
   type NaceModelSelectorFields,
   projectRouteMessages,
+  readStoredSelection,
   type SelectionContextMode,
   type SelectionPriority,
   type SelectOn,
@@ -257,33 +258,26 @@ export function naceModelSelectorMiddleware(config: NaceModelSelectorMiddlewareC
     return { messages, anchor, projected, eligible, fallbackId, tools };
   }
 
-  function isPlainObject(value: unknown): value is Record<string, unknown> {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-    const proto = Object.getPrototypeOf(value);
-    return proto === Object.prototype || proto === null;
-  }
-
   /**
-   * A checkpoint record is reused only when it is a plain object, its anchor
-   * matches, and `model` is null or a configured candidate that is still eligible.
-   * Any other shape is ignored. A throwing getter must not escape.
+   * A checkpoint record is reused only when the whole record is well formed,
+   * its anchor matches, and `model` is null or a configured candidate that is
+   * still eligible. The value returned is a new object of the checked fields.
+   * A record that fails any check is ignored, and a throwing getter must not escape.
    */
   function reusable(
     stored: unknown,
     anchor: string,
     eligible: readonly string[],
   ): ModelSelection | undefined {
-    try {
-      if (!isPlainObject(stored) || stored.anchor !== anchor) return undefined;
-      const model = stored.model;
-      if (model === null) return stored as unknown as ModelSelection;
-      if (typeof model !== "string" || !bindings.has(model) || !eligible.includes(model)) {
-        return undefined;
-      }
-      return stored as unknown as ModelSelection;
-    } catch {
+    const record = readStoredSelection(stored);
+    if (!record || record.anchor !== anchor) return undefined;
+    if (
+      record.model !== null &&
+      (!bindings.has(record.model) || !eligible.includes(record.model))
+    ) {
       return undefined;
     }
+    return record;
   }
 
   async function choose(request: AssessedRequest): Promise<ModelSelection> {

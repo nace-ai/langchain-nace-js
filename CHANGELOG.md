@@ -3,7 +3,7 @@
 ## 0.3.0
 
 - Drex Router model selection. `NaceModelSelector` and `naceModelSelectorMiddleware` send the conversation text and the candidate models to `POST /v1/route` and run the model Drex selects. The decision is stored on the agent under `modelSelection`, including `anchor`, the id of the human turn it belongs to. A run reuses that decision while the latest human message is the same and the model is still eligible. A new human message, or a model that no longer fits the request, starts a new selection. A resumed run reuses the stored one.
-- A route call that passes its deadline uses the fallback. An aborted run stays aborted and does not call the model. An image-only latest human turn does not call the route.
+- A route call that passes its deadline uses the fallback. An aborted run stays aborted and does not call the model. An image-only latest human turn does not call the route. When no candidate is eligible, the agent's own model runs: the fallback is used only when it is still eligible. A stored selection is reused only when the whole record is well formed.
 - `nace-sdk` moves from `^0.6.0` to `^0.11.1`. `0.11.1` is the first release that sends `selection_priority` on `client.route`.
 
 ## 0.2.0

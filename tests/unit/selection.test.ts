@@ -1,7 +1,7 @@
 import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { BaseTracer, type Run } from "@langchain/core/tracers/base";
 import fc from "fast-check";
-import { NaceClient } from "nace-sdk";
+import { APITimeoutError, NaceClient } from "nace-sdk";
 import { describe, expect, it, vi } from "vitest";
 import { VERSION } from "../../src/index.js";
 import {
@@ -246,6 +246,40 @@ describe("filterEligibleCandidates", () => {
     ).not.toContain("blind");
     const pdf = { content: [{ type: "file", mime_type: "application/pdf" }] };
     expect(filterEligibleCandidates(candidates, { messages: [pdf], tools: [] })).toContain("blind");
+    const nested = {
+      content: [
+        {
+          type: "tool_result",
+          content: [{ type: "image_url", image_url: { url: "data:image/png;base64,aa" } }],
+        },
+      ],
+    };
+    expect(filterEligibleCandidates(candidates, { messages: [nested], tools: [] })).not.toContain(
+      "blind",
+    );
+    const toolImage = new ToolMessage({
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "call_1",
+          content: [
+            { type: "image", source: { type: "base64", media_type: "image/png", data: "aa" } },
+          ],
+        },
+      ],
+      tool_call_id: "call_1",
+    });
+    expect(
+      filterEligibleCandidates(candidates, { messages: [toolImage], tools: [] }),
+    ).not.toContain("blind");
+    const cycle: { content: unknown[] } = { content: [] };
+    cycle.content.push(cycle);
+    expect(() =>
+      filterEligibleCandidates([{ id: "blind", images: false, tools: true }], {
+        messages: [cycle],
+        tools: [],
+      }),
+    ).not.toThrow();
     expect(
       filterEligibleCandidates(
         [
@@ -816,16 +850,17 @@ describe("NaceModelSelector", () => {
   });
 
   it("drops a request id that is the API key", async () => {
-    const key = "nace_sk_test";
+    const key = "req_Secret12345";
     const drex = fakeDrex([
       {
         body: { selected: "strong", probabilities: probs(["fast", "strong"], "strong") },
         headers: { "x-request-id": key },
       },
     ]);
-    const selection = await selector(drex.fetch).select(turns, {
-      candidates: ["fast", "strong"],
-    });
+    const selection = await new NaceModelSelector(offline(drex.fetch, { apiKey: key })).select(
+      turns,
+      { candidates: ["fast", "strong"] },
+    );
     expect(selection.requestId).toBeNull();
     expect(JSON.stringify(selection)).not.toContain(key);
     const shaped = "req_nacekey1";
@@ -863,6 +898,28 @@ describe("NaceModelSelector", () => {
       warn.mockRestore();
       now.mockRestore();
     }
+  });
+
+  it("maps a timeout that is not our deadline to connection_error", async () => {
+    const client = new NaceClient({
+      apiKey: "nace_sk_test",
+      baseURL: "https://drex.test",
+      fetch: async () => new Response("unused"),
+      retry: { maxRetries: 0 },
+    });
+    vi.spyOn(client, "route").mockReturnValue({
+      withResponse: () => Promise.reject(new APITimeoutError(5)),
+    } as never);
+    const outcome = await exchangeRoute(
+      client,
+      {
+        messages: [{ role: "user", content: "hi" }],
+        candidates: ["fast", "strong"],
+        selection_priority: "balanced",
+      },
+      { timeoutMs: 60_000 },
+    );
+    expect(outcome).toMatchObject({ type: "connection_error" });
   });
 
   it("a thrown non-status error becomes connection_error", async () => {

@@ -782,6 +782,55 @@ describe("naceModelSelectorMiddleware", () => {
     }
   });
 
+  it("reuses a well formed stored selection and ignores a malformed one", async () => {
+    const valid = {
+      model: "fast",
+      selected: "fast",
+      probabilities: { fast: 0.9, strong: 0.1 },
+      fallback: false,
+      reason: "selected",
+      priority: "balanced",
+      candidates: ["fast", "strong"],
+      requestId: "req_abc12345",
+      latencyMs: 4,
+      anchor: "human_1",
+    };
+    const malformed = [
+      { ...valid, reason: "nope" },
+      { ...valid, requestId: "raw-body" },
+      { ...valid, selected: "not-a-candidate" },
+      { ...valid, probabilities: { fast: 2 } },
+      { ...valid, fallback: "yes" },
+      { ...valid, candidates: ["fast", 1] },
+      { ...valid, model: null, reason: "nope", selected: null, fallback: true },
+    ];
+    const { agent, drex } = agentOf({
+      script: [valid, ...malformed].map(() => ({
+        body: routeReply("strong", ["fast", "strong"]),
+      })),
+      checkpointer: new MemorySaver(),
+    });
+    const thread = { configurable: { thread_id: "stored-record" } };
+    const message = new HumanMessage({ content: "hello", id: "human_1" });
+    await agent.invoke({ messages: [message] }, thread);
+    expect(drex.requests).toHaveLength(1);
+    await agent.updateState(thread, { modelSelection: valid });
+    const reused = await agent.invoke({ messages: [message] }, thread);
+    expect(drex.requests).toHaveLength(1);
+    expect(reused.modelSelection).toMatchObject({ model: "fast", reason: "selected" });
+    for (const stored of malformed) {
+      const before = drex.requests.length;
+      await agent.updateState(thread, { modelSelection: stored });
+      const result = await agent.invoke({ messages: [message] }, thread);
+      expect(drex.requests).toHaveLength(before + 1);
+      expect(result.modelSelection).toMatchObject({ model: "strong", reason: "selected" });
+      const body = JSON.stringify(result.modelSelection);
+      expect(body).not.toContain("nope");
+      expect(body).not.toContain("not-a-candidate");
+      expect(body).not.toContain("raw-body");
+    }
+  });
+
   it("ignores a stored selection that is not a plain eligible record", async () => {
     class Box {
       model = "fast";

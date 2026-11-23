@@ -9,7 +9,7 @@
 import type { CallbackManagerForChainRun } from "@langchain/core/callbacks/manager";
 import { BaseMessage } from "@langchain/core/messages";
 import { Runnable, type RunnableConfig } from "@langchain/core/runnables";
-import { APIError, APITimeoutError, NaceClient, NaceError as SdkNaceError } from "nace-sdk";
+import { APIError, NaceClient, NaceError as SdkNaceError } from "nace-sdk";
 
 import {
   attributedFetch,
@@ -199,6 +199,102 @@ const WARN_REASONS = new Set<SelectionReason>([
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+const SELECTION_REASONS: ReadonlySet<string> = new Set<SelectionReason>([
+  "selected",
+  "low_probability",
+  "single_candidate",
+  "no_input",
+  "no_eligible_candidate",
+  "timeout",
+  "connection_error",
+  "rate_limited",
+  "unavailable",
+  "auth_error",
+  "no_funds",
+  "invalid_request",
+  "invalid_response",
+]);
+
+/**
+ * A checkpoint record the middleware may store again.
+ *
+ * Every field has to match the documented shape. The result is a new object
+ * of those fields. A record that fails any check is ignored, and the caller
+ * selects again. A throwing getter is ignored too.
+ */
+export function readStoredSelection(value: unknown): ModelSelection | undefined {
+  try {
+    if (!isPlainObject(value)) return undefined;
+    const anchor = value.anchor;
+    if (typeof anchor !== "string") return undefined;
+    const reason = value.reason;
+    if (typeof reason !== "string" || !SELECTION_REASONS.has(reason)) return undefined;
+    const requestId = value.requestId;
+    if (requestId != null && (typeof requestId !== "string" || !REQUEST_ID.test(requestId))) {
+      return undefined;
+    }
+    const candidates = value.candidates;
+    if (!Array.isArray(candidates)) return undefined;
+    const ids = candidates.filter((id): id is string => typeof id === "string");
+    if (ids.length !== candidates.length) return undefined;
+    const selected = value.selected;
+    let cleanSelected: string | null;
+    if (selected === null) {
+      cleanSelected = null;
+    } else if (typeof selected === "string" && ids.includes(selected)) {
+      cleanSelected = selected;
+    } else {
+      return undefined;
+    }
+    const probabilities = value.probabilities;
+    if (!isPlainObject(probabilities)) return undefined;
+    const cleanProbabilities: Record<string, number> = {};
+    for (const [key, probability] of Object.entries(probabilities)) {
+      if (
+        typeof probability !== "number" ||
+        !Number.isFinite(probability) ||
+        probability < 0 ||
+        probability > 1
+      ) {
+        return undefined;
+      }
+      cleanProbabilities[key] = probability;
+    }
+    if (typeof value.fallback !== "boolean") return undefined;
+    const model = value.model;
+    let cleanModel: string | null;
+    if (model === null) cleanModel = null;
+    else if (typeof model === "string") cleanModel = model;
+    else return undefined;
+    const priority = value.priority;
+    if (priority !== "quality" && priority !== "balanced" && priority !== "cheapest") {
+      return undefined;
+    }
+    const latencyMs = value.latencyMs;
+    if (typeof latencyMs !== "number" || !Number.isFinite(latencyMs)) return undefined;
+    return {
+      model: cleanModel,
+      selected: cleanSelected,
+      probabilities: cleanProbabilities,
+      fallback: value.fallback,
+      reason: reason as SelectionReason,
+      priority,
+      candidates: ids,
+      requestId: typeof requestId === "string" ? requestId : null,
+      latencyMs,
+      anchor,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /** The error a cancelled run raises again. */
@@ -410,10 +506,20 @@ function isRouteImageBlock(block: unknown): boolean {
   return typeof mime === "string" && mime.startsWith("image/");
 }
 
+/** How deep an image scan walks nested `content` arrays. A cycle stops here. */
+const IMAGE_SCAN_DEPTH = 8;
+
+function containsImage(value: unknown, depth: number): boolean {
+  if (depth > IMAGE_SCAN_DEPTH) return false;
+  if (Array.isArray(value)) return value.some((entry) => containsImage(entry, depth + 1));
+  if (!isRecord(value)) return false;
+  if (isRouteImageBlock(value)) return true;
+  return containsImage(value.content, depth + 1);
+}
+
 function hasImage(messages: readonly unknown[]): boolean {
   for (const message of messages) {
-    const content = contentOf(message);
-    if (Array.isArray(content) && content.some((block) => isRouteImageBlock(block))) return true;
+    if (containsImage(contentOf(message), 0)) return true;
   }
   return false;
 }
@@ -780,7 +886,8 @@ function outcomeFromError(
   latencyMs: number,
   secrets: readonly string[],
 ): RouteOutcome {
-  if (error instanceof APITimeoutError) return { type: "timeout", requestId: null, latencyMs };
+  // Only this exchange's own deadline is a timeout. A timeout raised by the
+  // caller or the SDK before that deadline is a connection error.
   if (error instanceof APIError) {
     return {
       type: "status",

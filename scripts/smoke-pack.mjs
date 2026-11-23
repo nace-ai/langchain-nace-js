@@ -51,10 +51,11 @@ const red = readFileSync(join(root, "tests/fixtures/red.png")).toString("base64"
 writeFileSync(
   join(dir, "esm.mjs"),
   `
-import { NaceClassifier, NaceError, VERSION } from "@nace-ai/langchain-nace";
-import { naceAutoModeMiddleware, naceModelRouterMiddleware } from "@nace-ai/langchain-nace/middleware";
+import { NaceClassifier, NaceError, NaceModelSelector, VERSION } from "@nace-ai/langchain-nace";
+import { naceAutoModeMiddleware, naceModelRouterMiddleware, naceModelSelectorMiddleware } from "@nace-ai/langchain-nace/middleware";
 if (VERSION !== ${JSON.stringify(pkg.version)}) throw new Error("wrong version " + VERSION);
 if (typeof naceAutoModeMiddleware !== "function" || typeof naceModelRouterMiddleware !== "function") throw new Error("middleware missing");
+if (typeof NaceModelSelector !== "function" || typeof naceModelSelectorMiddleware !== "function") throw new Error("model selector missing");
 console.log("esm: imports ok", VERSION);
 if (process.env.NACE_API_KEY) {
   const c = new NaceClassifier({ questions: {
@@ -72,6 +73,22 @@ if (process.env.NACE_API_KEY) {
   try { await v2.invoke("x", { images: [${JSON.stringify(red)}] }); throw new Error("v2 accepted an image"); }
   catch (e) { if (!NaceError.isInstance(e)) throw e; }
   console.log("esm: text-only refusal ok");
+  const selector = new NaceModelSelector();
+  const selection = await selector.select(
+    [{ role: "user", content: "Say hello in one word." }],
+    {
+      candidates: [
+        { id: "smoke-small", provider: "openai", priceIn: 0.1, priceOut: 0.2, context: 8192, tags: ["fast"] },
+        { id: "smoke-large", provider: "openai", priceIn: 3, priceOut: 15, context: 128000, tags: ["strong"] },
+      ],
+      timeout: 30000,
+    },
+  );
+  const sum = Object.values(selection.probabilities).reduce((total, probability) => total + probability, 0);
+  if (selection.reason !== "selected" || typeof selection.selected !== "string" || !(Math.abs(sum - 1) < 0.02)) {
+    throw new Error("route reason " + selection.reason);
+  }
+  console.log("esm: live route ok", selection.selected, selection.reason);
 }
 `,
 );
@@ -79,10 +96,11 @@ if (process.env.NACE_API_KEY) {
 writeFileSync(
   join(dir, "cjs.cjs"),
   `
-const { NaceClassifier, NaceRateLimitError } = require("@nace-ai/langchain-nace");
-const { naceAutoModeMiddleware } = require("@nace-ai/langchain-nace/middleware");
+const { NaceClassifier, NaceModelSelector, NaceRateLimitError } = require("@nace-ai/langchain-nace");
+const { naceAutoModeMiddleware, naceModelSelectorMiddleware } = require("@nace-ai/langchain-nace/middleware");
 if (typeof NaceClassifier !== "function" || typeof NaceRateLimitError.isInstance !== "function") throw new Error("cjs exports missing");
 if (typeof naceAutoModeMiddleware !== "function") throw new Error("cjs middleware missing");
+if (typeof NaceModelSelector !== "function" || typeof naceModelSelectorMiddleware !== "function") throw new Error("cjs model selector missing");
 console.log("cjs: imports ok");
 `,
 );

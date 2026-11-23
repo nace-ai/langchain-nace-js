@@ -35,7 +35,7 @@
 | 💸 **`naceModelRouterMiddleware`**          | Pick the cheapest chat model that can handle each run; escalate when unsure.                                                                                    |
 | 🔁 **Drop-in for `@langchain/typesafe`**    | Change the imports and the API key; your code keeps working.                                                                                                    |
 
-**Contents:** [Install](#install) · [Quickstart](#quickstart) · [Switching from TypeSafe](#switching-from-langchaintypesafe) · [Models](#models) · [Images](#images-drex-max) · [Routing](#routing) · [Documents (NDI)](#documents-ndi) · [Agent middleware](#agent-middleware-experimental) · [Backends](#backends) · [Errors](#errors) · [Tracing](#tracing) · [Development](#development)
+**Contents:** [Install](#install) · [Quickstart](#quickstart) · [Switching from TypeSafe](#switching-from-langchaintypesafe) · [Models](#models) · [Images](#images-drex-max) · [Routing](#routing) · [Model selection](#model-selection-with-drex-router) · [Documents (NDI)](#documents-ndi) · [Agent middleware](#agent-middleware-experimental) · [Backends](#backends) · [Errors](#errors) · [Tracing](#tracing) · [Development](#development)
 
 ## Install
 
@@ -179,6 +179,99 @@ const chain = router.branch(
 
 **LangGraph:** `naceConditionalEdge({ question, state, minConfidence: 0.7 })` is a path function for `addConditionalEdges`. Below the threshold it returns `"human_review"`, so that node can `interrupt()` for a person. See [`examples/langgraph-router.ts`](https://github.com/nace-ai/langchain-nace-js/blob/main/examples/langgraph-router.ts).
 
+## Model selection with Drex Router
+
+Decision routing and model selection do different jobs. Decision routing asks Drex a `Choice` question you wrote and follows the label, so a graph can send a request to the billing agent or the support agent. Model selection asks Drex Router, a model trained to pick among candidate models, which generative model should write the reply inside that agent.
+
+One request uses both:
+
+1. A support request arrives.
+2. `NaceClassifier` answers a `Choice` question, billing or support. A LangGraph conditional edge sends the request to that agent.
+3. Inside the agent, the selector sends the conversation and the candidates to `POST /v1/route`. Drex Router picks the generative model.
+
+```ts
+import { createAgent } from "langchain";
+import { NaceModelSelector } from "@nace-ai/langchain-nace";
+import { naceModelSelectorMiddleware } from "@nace-ai/langchain-nace/middleware";
+
+const selector = new NaceModelSelector();
+const agent = createAgent({
+  model: fast,
+  tools: [],
+  middleware: [
+    naceModelSelectorMiddleware({
+      candidates: {
+        "openai/gpt-4o-mini": { model: fast },
+        "anthropic/claude-haiku-5.5": { model: strong },
+      },
+      fallback: "openai/gpt-4o-mini",
+      selector,
+    }),
+  ],
+});
+```
+
+The same selector can serve both agents. The chat models in [`examples/model-selection-agent.ts`](https://github.com/nace-ai/langchain-nace-js/blob/main/examples/model-selection-agent.ts) and [`examples/langgraph-model-selection.ts`](https://github.com/nace-ai/langchain-nace-js/blob/main/examples/langgraph-model-selection.ts) are scripted, so a run needs only `NACE_API_KEY`.
+
+```ts
+const edge = naceConditionalEdge({
+  question: {
+    type: "choice",
+    instructions: "Which team should own this support request?",
+    criteria: {
+      billing: "Charges, invoices, refunds, plans.",
+      support: "Bugs, outages, how-to questions.",
+    },
+  },
+  state: (state: { text: string }) => state.text,
+  minConfidence: 0.7,
+});
+graph.addConditionalEdges("triage", edge, ["billing", "support", "human_review"]);
+```
+
+| Option           | Default                   |                                                                                                                                    |
+| ---------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `candidates`     | required                  | Map of candidate id to `{ model, profile?, images?, tools? }`. `model` is a chat model or a name for `initChatModel`. At most 255. |
+| `priority`       | `"balanced"`              | `"quality"`, `"balanced"`, or `"cheapest"`. Sent as `selection_priority`.                                                          |
+| `fallback`       | `null`                    | Candidate id used when the route does not choose a model. `null` keeps the agent's own model.                                      |
+| `minProbability` | unset                     | Below this probability, use the fallback. Equal to the minimum still counts as selected.                                           |
+| `selectOn`       | `"run"`                   | `"run"` selects once per human turn. `"model_call"` selects on every model call.                                                   |
+| `context`        | `"conversation"`          | `"conversation"` sends the conversation. `"latest_human"` sends the system text and the latest human turn.                         |
+| `timeout`        | `3000`                    | Deadline in milliseconds for one route call.                                                                                       |
+| `selector`       | a new `NaceModelSelector` | A selector you already configured.                                                                                                 |
+
+| Outcome                                                  | `reason`                | Model used         |
+| -------------------------------------------------------- | ----------------------- | ------------------ |
+| Valid response, probability at or above `minProbability` | `selected`              | selected candidate |
+| Valid response, probability below `minProbability`       | `low_probability`       | fallback           |
+| One eligible candidate                                   | `single_candidate`      | that candidate     |
+| No human text                                            | `no_input`              | agent's own model  |
+| No eligible candidate                                    | `no_eligible_candidate` | agent's own model  |
+| Deadline passed, or HTTP 408 before that deadline        | `timeout`               | fallback           |
+| Connection error                                         | `connection_error`      | fallback           |
+| 429                                                      | `rate_limited`          | fallback           |
+| 5xx, including 503, 504, 529                             | `unavailable`           | fallback           |
+| 401, 403                                                 | `auth_error`            | fallback           |
+| 402                                                      | `no_funds`              | fallback           |
+| 413, 422, and other 4xx except 408                       | `invalid_request`       | fallback           |
+| Response fails validation                                | `invalid_response`      | fallback           |
+
+The route call gets one attempt. When the deadline passes, the selector discards a late response and uses the fallback. When the run is aborted, the abort is raised again and the model handler does not run. When no candidate is eligible, the agent's own model runs: the fallback is kept only when it passes the same image, tool, and context checks.
+
+`/v1/route` receives text turns only: system, user, and assistant. Tool calls and tool results are not sent. An image becomes `[image omitted]`. Only `text` blocks and plain strings are copied. The middleware keeps the latest human message, and fills the rest of the 24,000-character budget with the newest other turns. The result stays in chronological order. `NaceModelSelector.select` sends the turns you pass it and does not apply that budget.
+
+The decision is stored in state under `modelSelection`: `model`, `selected`, `probabilities`, `fallback`, `reason`, `priority`, `candidates`, `requestId`, `latencyMs`, and `anchor`. `anchor` is the latest human message's id plus a short digest of its text, or `count:<n>` plus that digest when the message has no id. It holds no message text. A new id or a new digest starts a new selection.
+
+With `selectOn: "run"`, a stored selection is reused while its `anchor` matches the current request, the whole record is well formed, and its model is still eligible. A new human message changes the anchor and starts a new selection. A stored model that can no longer handle the request, for example because a tool result added an image, also starts a new selection. A resumed run reads the checkpoint and reuses the selection. The model can change between runs on one thread. A record is ignored unless it is self-consistent (`selected` means `model` is that id and `fallback` is false), `model` is `null` or a configured id, `reason` is a documented reason, `requestId` is null or a `req_` id, `selected` is null or one of `candidates`, `candidates` is an array of strings, `probabilities` maps strings to finite numbers from 0 to 1, `fallback` is a boolean, and `anchor` is a string.
+
+An image-only latest human turn has no real text, in either context mode. The reason is `no_input`, the agent's own model runs, and no route request is sent.
+
+The price is $0.02 per 1M encoded input tokens. Only a 200 is charged. The selector's SDK client does not log route bodies or error bodies at any log level.
+
+A candidate whose model cannot be initialized, for example because its provider package is not installed, fails the model call with that error. That is a configuration error. The selector does not substitute the fallback.
+
+Put the selector first in `middleware`, so a later middleware sees the model that was chosen. Do not combine it with `naceModelRouterMiddleware`. Both replace the model. This route exists on the Nace Console only. It sends no CORS headers, so it does not run in a browser page.
+
 ## Documents (NDI)
 
 **NDI** is Nace Document Intelligence: the cloud service that parses, extracts and answers questions over documents. The three components below run in the same process as the classifier, read the same `NACE_API_KEY`, and follow the same rules as [Credentials and custom providers](#credentials-and-custom-providers).
@@ -318,6 +411,10 @@ The router picks the model once per run. Below `minConfidence` (default 0.6), or
 - a blocked unrequested delete;
 - a person approving a requested delete;
 - a screenshot-based block on a computer-use click.
+
+### `naceModelSelectorMiddleware`: the model selector
+
+The selector picks the generative model for an agent run. See [Model selection with Drex Router](#model-selection-with-drex-router). List it first in `middleware`. Do not combine it with `naceModelRouterMiddleware`.
 
 ## Backends
 

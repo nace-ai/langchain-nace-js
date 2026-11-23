@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- Drex Router model selection. `NaceModelSelector` and `naceModelSelectorMiddleware` send the conversation text and the candidate models to `POST /v1/route` and run the model Drex selects. The decision is stored on the agent under `modelSelection`, including `anchor`, the id of the human turn it belongs to. A run reuses that decision while the latest human message is the same and the model is still eligible. A new human message, or a model that no longer fits the request, starts a new selection. A resumed run reuses the stored one.
+- A route call that passes its deadline uses the fallback. An HTTP 408 before that deadline is also a timeout. An aborted run stays aborted and does not call the model, including when the abort lands after the model is initialized or while the handler is running. An image-only latest human turn does not call the route. When no candidate is eligible, the agent's own model runs: the fallback is used only when it is still eligible. A stored selection is reused only when the whole record is well formed and self-consistent. The stored `anchor` includes a short digest of the latest human message's text, so an edited message selects again. `NaceModelSelector.select` sends the turns it is given and does not apply the middleware's character budget. A model that cannot be initialized fails with that error and does not use the fallback. The selector does not log route bodies.
+- `nace-sdk` moves from `^0.6.0` to `^0.11.1`. `0.11.1` is the first release that sends `selection_priority` on `client.route`.
+
 ## 0.2.0
 
 - NDI (Nace Document Intelligence): `NaceDocumentLoader` (parse a URL, local file or bytes into Markdown `Document`s, whole or chunked by page or section), `NaceExtractTool` (extract JSON-Schema fields from a document, with each field's status, confidence and quoted source text) and `NaceSearchTool` (answer a question over an ingested workspace, with the answer, its confidence and its evidence). The three components share the classifier's credential rules (never OpenRouter), delete the job they create and the file they upload after the read, and are server-side only.

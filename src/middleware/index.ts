@@ -33,3 +33,8 @@ export {
   naceModelRouterMiddleware,
   naceModelRouterMiddleware as modelRouterMiddleware,
 } from "./modelRouter.js";
+export {
+  type ModelCandidate,
+  type NaceModelSelectorMiddlewareConfig,
+  naceModelSelectorMiddleware,
+} from "./modelSelector.js";

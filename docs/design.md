@@ -77,6 +77,8 @@ Resuming after an interrupt re-runs the hook. The decision is saved in the check
 | `NoulAnswer` / `ChoiceAnswer` / `ScoreAnswer` / `RawAnswer` | `noul` / `choice, probabilities, confidence` / `score, legend, probabilities, confidence` / `type` + any fields                                             |
 | `RouteDecision`                                             | `route`, `answer: ChoiceAnswer`, `fellBack`                                                                                                                 |
 | `NaceModelRoute` (agent state `modelRoute`)                 | `route`, `choice`, `confidence`, `probabilities`, `escalated`, `reason: confident \| low_confidence \| error`                                               |
+| `ModelSelection` (agent state `modelSelection`)             | `model`, `selected`, `probabilities`, `fallback`, `reason`, `priority`, `candidates`, `requestId`, `latencyMs`, `anchor`                                    |
+| `CandidateProfile`                                          | `provider`, `priceIn`, `priceOut`, `context`, `tags`. The candidate id is the map key, not a field of the profile.                                          |
 | `GateVerdict`                                               | `risk` (0..1), `pDestructive`, `pMatchesRequest`, `response`                                                                                                |
 
 ## Wire format (what reaches Drex)
@@ -89,6 +91,14 @@ Resuming after an interrupt re-runs the hook. The decision is saved in the check
 | `images`         | base64 / data URL / `{ type: "workspace_file", ... }`; explicit images first, then images from messages             |
 | OpenRouter       | no `images`; `state` = `[{ type: "text" }, { type: "image_url", image_url: { url: "data:..." } }, ...]`             |
 | headers          | `User-Agent`, `X-Nace-Client` = `langchain-nace-js/<version>`; OpenRouter also `HTTP-Referer`, `X-OpenRouter-Title` |
+
+## Model selection
+
+Decision routing answers a caller-written `Choice` and picks a graph branch. Model selection calls `POST /v1/route` and picks the generative model inside the chosen agent. The documented flow is one support request: a `NaceClassifier` edge sends it to the billing agent or the support agent, and `naceModelSelectorMiddleware` selects the model that agent runs.
+
+The selector runs in `wrapModelCall`. It does not register a `beforeAgent` hook, because on `langchain` 1.3 that hook's update shadows later state updates. The decision is a `Command` update on `modelSelection`. A stored record is reused only when it is a plain object, its `anchor` equals the latest human message's id (or `count:<n>`), and `model` is `null` or a configured id that is still eligible. A new human message or an ineligible model starts a new selection. A resumed run reads the checkpoint.
+
+The route body is text only: `messages`, `candidates`, and `selection_priority`. Tool calls and tool results are dropped. Images become `[image omitted]`. A latest human turn that has no real text, including an image-only turn, is `no_input` in both context modes and sends no request. The deadline discards a late response and uses the fallback. An aborted run raises the abort and does not call the handler. The price is $0.02 per 1M encoded input tokens, and only a 200 is charged. The route is not available through OpenRouter and does not run in a browser.
 
 ## NDI components
 

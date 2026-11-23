@@ -108,3 +108,7 @@ jobs:
         run: npx tsx examples/support-agent.ts
       - if: ${{ env.NACE_API_KEY != '' }}
         run: npx tsx examples/langgraph-router.ts
+      - if: ${{ env.NACE_API_KEY != '' }}
+        run: npx tsx examples/model-selection-agent.ts
+      - if: ${{ env.NACE_API_KEY != '' }}
+        run: npx tsx examples/langgraph-model-selection.ts

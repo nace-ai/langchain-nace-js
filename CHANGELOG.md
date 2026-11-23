@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- Drex Router model selection. `NaceModelSelector` and `naceModelSelectorMiddleware` send the conversation text and the candidate models to `POST /v1/route` and run the model Drex selects. The decision is stored on the agent under `modelSelection`, including `anchor`, the id of the human turn it belongs to. A run reuses that decision while the latest human message is the same and the model is still eligible. A new human message, or a model that no longer fits the request, starts a new selection. A resumed run reuses the stored one.
+- A route call that passes its deadline uses the fallback. An aborted run stays aborted and does not call the model. An image-only latest human turn does not call the route.
+- `nace-sdk` moves from `^0.6.0` to `^0.11.1`. `0.11.1` is the first release that sends `selection_priority` on `client.route`.
+
 ## 0.2.0
 
 - NDI (Nace Document Intelligence): `NaceDocumentLoader` (parse a URL, local file or bytes into Markdown `Document`s, whole or chunked by page or section), `NaceExtractTool` (extract JSON-Schema fields from a document, with each field's status, confidence and quoted source text) and `NaceSearchTool` (answer a question over an ingested workspace, with the answer, its confidence and its evidence). The three components share the classifier's credential rules (never OpenRouter), delete the job they create and the file they upload after the read, and are server-side only.

@@ -44,6 +44,17 @@ export {
   type NaceRouterFields,
   type RouteDecision,
 } from "./router.js";
+export {
+  type CandidateProfile,
+  type ModelSelection,
+  type ModelSelectOptions,
+  NaceModelSelector,
+  type NaceModelSelectorFields,
+  type RouteMessage,
+  type SelectionPriority,
+  type SelectionReason,
+  type SelectorCandidate,
+} from "./selection.js";
 export { encodeState, type State, type StateValue } from "./state.js";
 export type {
   Answer,

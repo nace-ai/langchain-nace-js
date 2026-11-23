@@ -75,6 +75,27 @@ describe("projectRouteMessages", () => {
     expect(JSON.stringify(projected)).not.toContain(CANARY);
   });
 
+  it("copies text blocks only", () => {
+    const projected = projectRouteMessages(
+      {
+        messages: [
+          new HumanMessage({
+            content: [
+              { type: "text", text: "keep" },
+              { type: "tool_result", text: CANARY },
+              { type: "reasoning", text: CANARY },
+            ] as never,
+          }),
+        ],
+      },
+      "conversation",
+    );
+    expect(projected).toEqual([{ role: "user", content: "keep" }]);
+    const plain = projectRouteMessages({ messages: [new HumanMessage("also")] }, "conversation");
+    expect(plain).toEqual([{ role: "user", content: "also" }]);
+    expect(JSON.stringify(projected)).not.toContain(CANARY);
+  });
+
   it("latest human with no real text is no_input in both context modes", () => {
     const blank = [new HumanMessage("old text"), new HumanMessage("   ")];
     expect(projectRouteMessages({ messages: blank }, "latest_human")).toBeNull();
@@ -243,6 +264,27 @@ describe("filterEligibleCandidates", () => {
     const inputImage = { content: [{ type: "input_image", image_url: "data:image/png,aa" }] };
     expect(
       filterEligibleCandidates(candidates, { messages: [inputImage], tools: [] }),
+    ).not.toContain("blind");
+    const bedrock = {
+      content: [
+        {
+          toolResult: {
+            content: [{ image: { format: "png", source: { bytes: "aa" } } }],
+          },
+        },
+      ],
+    };
+    expect(filterEligibleCandidates(candidates, { messages: [bedrock], tools: [] })).not.toContain(
+      "blind",
+    );
+    const upperMime = { content: [{ type: "file", mime_type: "Image/PNG" }] };
+    expect(
+      filterEligibleCandidates(candidates, { messages: [upperMime], tools: [] }),
+    ).not.toContain("blind");
+    let deep: unknown = { note: "plain" };
+    for (let level = 0; level < 12; level += 1) deep = { nest: deep };
+    expect(
+      filterEligibleCandidates(candidates, { messages: [{ content: [deep] }], tools: [] }),
     ).not.toContain("blind");
     const pdf = { content: [{ type: "file", mime_type: "application/pdf" }] };
     expect(filterEligibleCandidates(candidates, { messages: [pdf], tools: [] })).toContain("blind");
@@ -545,7 +587,8 @@ describe("selectionFromOutcome", () => {
       },
     ];
     for (const row of rows) {
-      const selection = selectionFromOutcome(row.outcome, context);
+      const outcome = { ...row.outcome, detail: CANARY, body: { message: CANARY } };
+      const selection = selectionFromOutcome(outcome, context);
       expect(selection.reason, row.reason).toBe(row.reason);
       expect(selection.model, row.reason).toBe(row.model);
       expect(JSON.stringify(selection)).not.toContain(CANARY);
@@ -560,10 +603,110 @@ describe("selectionFromOutcome", () => {
 
 describe("NaceModelSelector", () => {
   it("case 18: refuses an OpenRouter base URL at construction", () => {
+    for (const baseUrl of [
+      "https://openrouter.ai/api/v1",
+      "https://API.OpenRouter.ai/api/v1",
+      "https://gateway.openrouter.ai./v1",
+    ]) {
+      expect(() => new NaceModelSelector({ baseUrl, apiKey: "sk-or-test" })).toThrow(/OpenRouter/);
+    }
     expect(
       () =>
-        new NaceModelSelector({ baseUrl: "https://openrouter.ai/api/v1", apiKey: "sk-or-test" }),
-    ).toThrow(/OpenRouter/);
+        new NaceModelSelector({ baseUrl: "https://notopenrouter.ai/api", apiKey: "nace_sk_test" }),
+    ).not.toThrow();
+  });
+
+  it("refuses a fallback that is not one of the candidates", async () => {
+    await expect(
+      selector(fakeDrex().fetch).select(turns, {
+        candidates: ["fast", "strong"],
+        fallback: "missing",
+      }),
+    ).rejects.toThrow(/fallback/);
+  });
+
+  it("maps an HTTP 408 that arrives before the deadline to timeout", async () => {
+    const fetch: typeof globalThis.fetch = async () =>
+      new Response(JSON.stringify({ error: { message: "slow" } }), {
+        status: 408,
+        headers: { "content-type": "application/json" },
+      });
+    const selection = await selector(fetch).select(turns, {
+      candidates: ["fast", "strong"],
+      fallback: "fast",
+      timeout: 5_000,
+    });
+    expect(selection.reason).toBe("timeout");
+  });
+
+  it("does not log message text when the SDK log level is debug", async () => {
+    const previous = process.env.NACE_LOG_LEVEL;
+    process.env.NACE_LOG_LEVEL = "debug";
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const drex = fakeDrex([
+      {
+        status: 500,
+        body: { error: { message: CANARY } },
+      },
+    ]);
+    try {
+      await new NaceModelSelector(offline(drex.fetch)).select(
+        [{ role: "user", content: `hello ${CANARY}` }],
+        { candidates: ["fast", "strong"], fallback: "fast" },
+      );
+      const logged = [debug, info, warn, error, log].flatMap((spy) => spy.mock.calls).join(" ");
+      expect(logged).not.toContain(CANARY);
+    } finally {
+      debug.mockRestore();
+      info.mockRestore();
+      warn.mockRestore();
+      error.mockRestore();
+      log.mockRestore();
+      if (previous === undefined) delete process.env.NACE_LOG_LEVEL;
+      else process.env.NACE_LOG_LEVEL = previous;
+    }
+  });
+
+  it("removes the deadline timer and the abort listener when a hanging fetch is aborted", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const reason = new Error("stop");
+    const add = vi.spyOn(controller.signal, "addEventListener");
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    const client = {
+      route: () => ({ withResponse: () => new Promise(() => {}) }),
+    } as unknown as NaceClient;
+    const pending = exchangeRoute(
+      client,
+      {
+        messages: [{ role: "user", content: "hi" }],
+        candidates: ["fast", "strong"],
+        selection_priority: "balanced",
+      },
+      { signal: controller.signal, timeoutMs: 60_000 },
+    ).then(
+      () => ({ failed: false as const }),
+      (error: unknown) => ({ failed: true as const, error }),
+    );
+    try {
+      controller.abort(reason);
+      const outcome = await pending;
+      expect(outcome.failed).toBe(true);
+      if (outcome.failed) expect(outcome.error).toBe(reason);
+      const adds = add.mock.calls.filter((call) => call[0] === "abort").length;
+      const removes = remove.mock.calls.filter((call) => call[0] === "abort").length;
+      expect(adds).toBeGreaterThan(0);
+      expect(removes).toBe(adds);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      add.mockRestore();
+      remove.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it("case 20: refuses an empty list, a long id and a bad profile", async () => {

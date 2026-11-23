@@ -10,7 +10,7 @@
  * @experimental The API may change without notice.
  */
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import { Command } from "@langchain/langgraph";
+import { Command, isCommand } from "@langchain/langgraph";
 import { createMiddleware, initChatModel } from "langchain";
 import * as z from "zod/v4";
 
@@ -90,6 +90,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Keep the handler's return shape and attach the selection.
+ *
+ * A single model message becomes a state update. A `Command` keeps its own
+ * update, with `modelSelection` added. A structured-output object is written
+ * as its `structuredResponse`, its `messages`, and `modelSelection`. Putting
+ * the object itself in `messages` drops `structuredResponse`. Returning the
+ * object unchanged drops `modelSelection`, because the agent node copies only
+ * those two fields.
+ */
+function withSelection(response: unknown, selection: ModelSelection): Command {
+  if (isCommand(response)) {
+    const update = isRecord(response.update) ? response.update : {};
+    return new Command({
+      goto: response.goto,
+      graph: response.graph,
+      resume: response.resume,
+      update: { ...update, modelSelection: selection },
+    });
+  }
+  if (isRecord(response) && "structuredResponse" in response && "messages" in response) {
+    return new Command({
+      update: {
+        modelSelection: selection,
+        structuredResponse: response.structuredResponse,
+        messages: response.messages,
+      },
+    });
+  }
+  return new Command({ update: { modelSelection: selection, messages: [response] } });
+}
+
+/**
  * Select the model for each agent run with Drex Router.
  *
  * The first model call of a human turn sends the conversation and the eligible
@@ -144,6 +176,11 @@ export function naceModelSelectorMiddleware(config: NaceModelSelectorMiddlewareC
         `naceModelSelectorMiddleware: candidate "${id}" has an invalid tools flag.`,
       );
     }
+    if (isRecord(candidate.profile) && "id" in candidate.profile && candidate.profile.id !== id) {
+      throw new NaceError(
+        `naceModelSelectorMiddleware: candidate "${id}" has a profile id that does not match its key.`,
+      );
+    }
     bindings.set(id, {
       id,
       model: candidate.model as string | BaseChatModel,
@@ -166,7 +203,7 @@ export function naceModelSelectorMiddleware(config: NaceModelSelectorMiddlewareC
   }
   wireCandidates(
     [...bindings.values()].map((binding) =>
-      binding.profile ? { id: binding.id, ...binding.profile } : binding.id,
+      binding.profile ? { ...binding.profile, id: binding.id } : binding.id,
     ),
   );
   if (config.fallback != null && !bindings.has(config.fallback)) {
@@ -209,18 +246,30 @@ export function naceModelSelectorMiddleware(config: NaceModelSelectorMiddlewareC
    * The only call to the model handler. One `wrapModelCall` reaches it once,
    * except when the run was cancelled.
    */
-  async function callModel<Request extends { model: unknown }>(
+  async function callModel<Request extends { model: unknown; runtime?: { signal?: AbortSignal } }>(
     request: Request,
     handler: (request: Request) => Promise<unknown> | unknown,
     selection: ModelSelection,
   ) {
+    const signal = request.runtime?.signal;
+    if (signal?.aborted) throw cancellationError(signal);
     const id = selection.model;
-    const outgoing =
-      id !== null && bindings.has(id)
-        ? ({ ...request, model: await modelFor(id) } as Request)
-        : request;
-    const response = await handler(outgoing);
-    return new Command({ update: { modelSelection: selection, messages: [response] } });
+    let outgoing = request;
+    if (id !== null && bindings.has(id)) {
+      const model = await modelFor(id);
+      if (signal?.aborted) throw cancellationError(signal);
+      outgoing = { ...request, model } as Request;
+    }
+    if (signal?.aborted) throw cancellationError(signal);
+    let response: unknown;
+    try {
+      response = await handler(outgoing);
+    } catch (error) {
+      if (signal?.aborted) throw cancellationError(signal);
+      throw error;
+    }
+    if (signal?.aborted) throw cancellationError(signal);
+    return withSelection(response, selection);
   }
 
   interface AssessedRequest {
@@ -300,7 +349,7 @@ export function naceModelSelectorMiddleware(config: NaceModelSelectorMiddlewareC
     } else {
       const candidates: SelectorCandidate[] = eligible.map((id) => {
         const binding = bindings.get(id)!;
-        return binding.profile ? { id, ...binding.profile } : id;
+        return binding.profile ? { ...binding.profile, id } : id;
       });
       const call: ModelSelectOptions = {
         candidates,
@@ -328,6 +377,7 @@ export function naceModelSelectorMiddleware(config: NaceModelSelectorMiddlewareC
         selectOn === "run"
           ? (reusable(stored, anchor, eligible) ?? (await choose(request)))
           : await choose(request);
+      if (signal?.aborted) throw cancellationError(signal);
       return callModel(request, handler, selection);
     },
   });

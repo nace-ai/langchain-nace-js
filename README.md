@@ -248,26 +248,28 @@ graph.addConditionalEdges("triage", edge, ["billing", "support", "human_review"]
 | One eligible candidate                                   | `single_candidate`      | that candidate     |
 | No human text                                            | `no_input`              | agent's own model  |
 | No eligible candidate                                    | `no_eligible_candidate` | agent's own model  |
-| Deadline passed                                          | `timeout`               | fallback           |
+| Deadline passed, or HTTP 408 before that deadline        | `timeout`               | fallback           |
 | Connection error                                         | `connection_error`      | fallback           |
 | 429                                                      | `rate_limited`          | fallback           |
 | 5xx, including 503, 504, 529                             | `unavailable`           | fallback           |
 | 401, 403                                                 | `auth_error`            | fallback           |
 | 402                                                      | `no_funds`              | fallback           |
-| 413, 422, and other 4xx                                  | `invalid_request`       | fallback           |
+| 413, 422, and other 4xx except 408                       | `invalid_request`       | fallback           |
 | Response fails validation                                | `invalid_response`      | fallback           |
 
 The route call gets one attempt. When the deadline passes, the selector discards a late response and uses the fallback. When the run is aborted, the abort is raised again and the model handler does not run. When no candidate is eligible, the agent's own model runs: the fallback is kept only when it passes the same image, tool, and context checks.
 
-`/v1/route` receives text turns only: system, user, and assistant. Tool calls and tool results are not sent. An image becomes `[image omitted]`. The latest human message is kept, and the rest of the 24,000-character budget is filled with the newest other turns. The result stays in chronological order.
+`/v1/route` receives text turns only: system, user, and assistant. Tool calls and tool results are not sent. An image becomes `[image omitted]`. Only `text` blocks and plain strings are copied. The middleware keeps the latest human message, and fills the rest of the 24,000-character budget with the newest other turns. The result stays in chronological order. `NaceModelSelector.select` sends the turns you pass it and does not apply that budget.
 
-The decision is stored in state under `modelSelection`: `model`, `selected`, `probabilities`, `fallback`, `reason`, `priority`, `candidates`, `requestId`, `latencyMs`, and `anchor`. `anchor` is the id of the latest human message, or `count:<n>` when that message has no id. It holds no message text.
+The decision is stored in state under `modelSelection`: `model`, `selected`, `probabilities`, `fallback`, `reason`, `priority`, `candidates`, `requestId`, `latencyMs`, and `anchor`. `anchor` is the latest human message's id plus a short digest of its text, or `count:<n>` plus that digest when the message has no id. It holds no message text. A new id or a new digest starts a new selection.
 
-With `selectOn: "run"`, a stored selection is reused while its `anchor` matches the current request, the whole record is well formed, and its model is still eligible. A new human message changes the anchor and starts a new selection. A stored model that can no longer handle the request, for example because a tool result added an image, also starts a new selection. A resumed run reads the checkpoint and reuses the selection. The model can change between runs on one thread. A record is ignored unless `model` is `null` or a configured id, `reason` is a documented reason, `requestId` is null or a `req_` id, `selected` is null or one of `candidates`, `candidates` is an array of strings, `probabilities` maps strings to finite numbers from 0 to 1, `fallback` is a boolean, and `anchor` is a string.
+With `selectOn: "run"`, a stored selection is reused while its `anchor` matches the current request, the whole record is well formed, and its model is still eligible. A new human message changes the anchor and starts a new selection. A stored model that can no longer handle the request, for example because a tool result added an image, also starts a new selection. A resumed run reads the checkpoint and reuses the selection. The model can change between runs on one thread. A record is ignored unless it is self-consistent (`selected` means `model` is that id and `fallback` is false), `model` is `null` or a configured id, `reason` is a documented reason, `requestId` is null or a `req_` id, `selected` is null or one of `candidates`, `candidates` is an array of strings, `probabilities` maps strings to finite numbers from 0 to 1, `fallback` is a boolean, and `anchor` is a string.
 
 An image-only latest human turn has no real text, in either context mode. The reason is `no_input`, the agent's own model runs, and no route request is sent.
 
-The price is $0.02 per 1M encoded input tokens. Only a 200 is charged.
+The price is $0.02 per 1M encoded input tokens. Only a 200 is charged. The selector's SDK client does not log route bodies or error bodies at any log level.
+
+A candidate whose model cannot be initialized, for example because its provider package is not installed, fails the model call with that error. That is a configuration error. The selector does not substitute the fallback.
 
 Put the selector first in `middleware`, so a later middleware sees the model that was chosen. Do not combine it with `naceModelRouterMiddleware`. Both replace the model. This route exists on the Nace Console only. It sends no CORS headers, so it does not run in a browser page.
 

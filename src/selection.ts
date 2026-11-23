@@ -16,7 +16,6 @@ import {
   DEFAULT_BASE_URL,
   env,
   hasUserinfo,
-  isOpenRouter,
   resolveApiKey,
 } from "./classifier.js";
 import { NaceError } from "./errors.js";
@@ -40,6 +39,7 @@ const PROFILE_KEYS = new Set(["id", "provider", "priceIn", "priceOut", "context"
 const PRIORITIES = ["quality", "balanced", "cheapest"] as const;
 const REQUEST_ID = /^req_[A-Za-z0-9]{8,64}$/;
 const DEADLINE = Symbol("deadline");
+const CALLER_ABORT = Symbol("caller-abort");
 
 /** How Drex weighs the candidates. Sent as `selection_priority`. */
 export type SelectionPriority = (typeof PRIORITIES)[number];
@@ -274,6 +274,10 @@ export function readStoredSelection(value: unknown): ModelSelection | undefined 
     if (model === null) cleanModel = null;
     else if (typeof model === "string") cleanModel = model;
     else return undefined;
+    // `selected` uses the chosen id. A fallback record must not claim that reason.
+    if (reason === "selected" && (cleanModel !== cleanSelected || value.fallback !== false)) {
+      return undefined;
+    }
     const priority = value.priority;
     if (priority !== "quality" && priority !== "balanced" && priority !== "cheapest") {
       return undefined;
@@ -477,8 +481,7 @@ function textOf(message: unknown): string {
       parts.push(block);
       continue;
     }
-    if (!isRecord(block) || typeof block.text !== "string") continue;
-    if (block.type === "tool_use" || block.type === "tool_call") continue;
+    if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") continue;
     parts.push(block.text);
   }
   return parts.join("\n");
@@ -503,23 +506,32 @@ function isRouteImageBlock(block: unknown): boolean {
   if (kind === "image" || kind === "image_url" || kind === "input_image") return true;
   if (kind !== "media" && kind !== "file") return false;
   const mime = mimeOf(block);
-  return typeof mime === "string" && mime.startsWith("image/");
+  return typeof mime === "string" && mime.toLowerCase().startsWith("image/");
 }
 
-/** How deep an image scan walks nested `content` arrays. A cycle stops here. */
+/** How deep an image scan walks. A deeper container may still hold an image. */
 const IMAGE_SCAN_DEPTH = 8;
 
-function containsImage(value: unknown, depth: number): boolean {
-  if (depth > IMAGE_SCAN_DEPTH) return false;
-  if (Array.isArray(value)) return value.some((entry) => containsImage(entry, depth + 1));
+function containsImage(value: unknown, depth: number, seen: WeakSet<object>): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  // Fail closed: a container past the limit is treated as an image.
+  if (depth > IMAGE_SCAN_DEPTH) return true;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.some((entry) => containsImage(entry, depth + 1, seen));
+  }
   if (!isRecord(value)) return false;
   if (isRouteImageBlock(value)) return true;
-  return containsImage(value.content, depth + 1);
+  for (const nested of Object.values(value)) {
+    if (containsImage(nested, depth + 1, seen)) return true;
+  }
+  return false;
 }
 
 function hasImage(messages: readonly unknown[]): boolean {
   for (const message of messages) {
-    if (containsImage(contentOf(message), 0)) return true;
+    if (containsImage(message, 0, new WeakSet())) return true;
   }
   return false;
 }
@@ -534,8 +546,22 @@ function idOf(message: unknown): unknown {
 }
 
 /**
+ * FNV-1a over the text. The digest is not a secret and it is not the text.
+ */
+function textDigest(text: string): string {
+  let hash = 0x811c9dc5;
+  for (const char of text) {
+    hash ^= char.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
  * The anchor stored with a selection: the latest human message's id, or
- * `count:<n>` when that id is missing. The value never includes message text.
+ * `count:<n>` when that id is missing, plus a digest of that message's text.
+ * The value never includes message text. A new id or a new digest starts a
+ * new selection.
  */
 export function selectionAnchor(messages: readonly unknown[]): string {
   let humans = 0;
@@ -545,9 +571,10 @@ export function selectionAnchor(messages: readonly unknown[]): string {
     humans += 1;
     latest = message;
   }
+  const digest = textDigest(latest === undefined ? "" : textOf(latest));
   const id = latest === undefined ? undefined : idOf(latest);
-  if (typeof id === "string" && id.length > 0) return id;
-  return `count:${humans}`;
+  if (typeof id === "string" && id.length > 0) return `${id}:${digest}`;
+  return `count:${humans}:${digest}`;
 }
 
 function lastHumanMessage(messages: readonly unknown[]): unknown | undefined {
@@ -959,7 +986,14 @@ async function runExchange(
   if (runSignal?.aborted) throw cancellationError(runSignal);
   const controller = new AbortController();
   let timedOut = false;
-  const onAbort = () => controller.abort();
+  let noteAbort: (() => void) | undefined;
+  const callerAbort = new Promise<typeof CALLER_ABORT>((resolve) => {
+    noteAbort = () => resolve(CALLER_ABORT);
+  });
+  const onAbort = () => {
+    controller.abort();
+    noteAbort?.();
+  };
   if (runSignal) runSignal.addEventListener("abort", onAbort);
   const started = Date.now();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -986,8 +1020,13 @@ async function runExchange(
         (error: unknown) => ({ kind: "error" as const, error }),
       ),
       deadline,
+      callerAbort,
     ]);
     const latencyMs = Date.now() - started;
+    if (winner === CALLER_ABORT) {
+      if (!runSignal) return { type: "connection_error", latencyMs };
+      throw cancellationError(runSignal);
+    }
     if (runSignal?.aborted) throw cancellationError(runSignal);
     // An error or a body that arrives once the deadline has passed is a timeout,
     // even when the timer callback has not run yet.
@@ -1055,6 +1094,46 @@ class SelectionTrace extends Runnable<TraceInput, ModelSelection> {
   }
 }
 
+/** `openrouter.ai` and any subdomain, ignoring case and a trailing dot. */
+function isOpenRouterHost(baseUrl: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(baseUrl).hostname;
+  } catch {
+    return false;
+  }
+  hostname = hostname.replace(/\.$/, "").toLowerCase();
+  return hostname === "openrouter.ai" || hostname.endsWith(".openrouter.ai");
+}
+
+/** Drops request and error bodies. The SDK would otherwise print them at debug. */
+function redactLogValue(value: unknown): unknown {
+  if (
+    value == null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+  return "[redacted]";
+}
+
+const routeLogger = {
+  debug(message: string, ...args: unknown[]) {
+    console.debug(message, ...args.map(redactLogValue));
+  },
+  info(message: string, ...args: unknown[]) {
+    console.info(message, ...args.map(redactLogValue));
+  },
+  warn(message: string, ...args: unknown[]) {
+    console.warn(message, ...args.map(redactLogValue));
+  },
+  error(message: string, ...args: unknown[]) {
+    console.error(message, ...args.map(redactLogValue));
+  },
+};
+
 /**
  * Asks Drex Router which candidate should answer.
  *
@@ -1086,7 +1165,7 @@ export class NaceModelSelector {
         "`baseUrl` must not contain a user name or password; pass the key as `apiKey`.",
       );
     }
-    if (isOpenRouter(baseUrl)) {
+    if (isOpenRouterHost(baseUrl)) {
       throw new NaceError(
         "Model selection is not available through OpenRouter; use a Nace endpoint.",
       );
@@ -1109,6 +1188,7 @@ export class NaceModelSelector {
         clientInfo: CLIENT_NAME,
         dangerouslyAllowBrowser: fields.dangerouslyAllowBrowser ?? false,
         fetch: attributedFetch(fields.fetch ?? ((input, init) => globalThis.fetch(input, init))),
+        logger: routeLogger,
       });
     } catch (error) {
       if (error instanceof SdkNaceError) throw new NaceError(error.message, { cause: error });
@@ -1146,6 +1226,9 @@ export class NaceModelSelector {
     const wire = wireCandidates(options?.candidates ?? this.#candidates);
     const sentIds = wire.map(candidateId);
     const fallbackId = options?.fallback ?? null;
+    if (fallbackId !== null && !sentIds.includes(fallbackId)) {
+      throw new NaceError("The fallback is not one of the candidates.");
+    }
     const turns = normalizeTurns(messages);
     const traceInput = {
       candidates: sentIds,

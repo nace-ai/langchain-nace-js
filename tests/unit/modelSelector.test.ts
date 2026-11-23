@@ -10,12 +10,13 @@ import {
 import { ChatGenerationChunk, type ChatResult } from "@langchain/core/outputs";
 import { tool } from "@langchain/core/tools";
 import { Command, interrupt, MemorySaver } from "@langchain/langgraph";
-import { createAgent, createMiddleware } from "langchain";
+import { createAgent, createMiddleware, providerStrategy } from "langchain";
 import { describe, expect, it, vi } from "vitest";
 import * as z from "zod/v4";
 
 import { NaceModelSelector } from "../../src/index.js";
 import { naceModelSelectorMiddleware } from "../../src/middleware/index.js";
+import { selectionAnchor } from "../../src/selection.js";
 import { fakeDrex, offline, ScriptedChatModel } from "./helpers.js";
 
 const CANARY = "CANARY-middleware-9f3c";
@@ -81,6 +82,47 @@ function routeReply(selected: string, ids: string[], top = 0.8) {
 
 function pair(content: string) {
   return new ScriptedChatModel([new AIMessage(content)]);
+}
+
+/** A chat model that answers a response schema, either as a tool call or as JSON text. */
+class StructuredReply extends BaseChatModel {
+  private toolName: string | undefined;
+
+  constructor(
+    private readonly answer: string,
+    private readonly mode: "tool" | "json",
+  ) {
+    super({});
+  }
+
+  _llmType(): string {
+    return "structured-reply";
+  }
+
+  bindTools(tools: { name?: string; function?: { name?: string } }[]): this {
+    const first = tools[0];
+    this.toolName = first?.name ?? first?.function?.name;
+    return this;
+  }
+
+  async _generate(): Promise<ChatResult> {
+    if (this.mode === "json") {
+      const message = new AIMessage(JSON.stringify({ answer: this.answer }));
+      return { generations: [{ message, text: message.text }] };
+    }
+    const message = new AIMessage({
+      content: "",
+      tool_calls: [
+        {
+          id: "call_1",
+          name: this.toolName ?? "extract",
+          args: { answer: this.answer },
+          type: "tool_call",
+        },
+      ],
+    });
+    return { generations: [{ message, text: "" }] };
+  }
 }
 
 function agentOf(options: {
@@ -597,6 +639,35 @@ describe("naceModelSelectorMiddleware", () => {
     expect(drex.requests).toHaveLength(1);
   });
 
+  it("selects again when the same message id has different text", async () => {
+    const { agent, drex } = agentOf({
+      script: [
+        { body: routeReply("strong", ["fast", "strong"]) },
+        { body: routeReply("fast", ["fast", "strong"]) },
+      ],
+      checkpointer: new MemorySaver(),
+    });
+    const thread = { configurable: { thread_id: "edited" } };
+    const first = await agent.invoke(
+      { messages: [new HumanMessage({ content: "hello", id: "human_1" })] },
+      thread,
+    );
+    const again = await agent.invoke(
+      { messages: [new HumanMessage({ content: "hello", id: "human_1" })] },
+      thread,
+    );
+    expect(drex.requests).toHaveLength(1);
+    expect(again.modelSelection).toMatchObject({ model: "strong" });
+    const edited = await agent.invoke(
+      { messages: [new HumanMessage({ content: "edited", id: "human_1" })] },
+      thread,
+    );
+    expect(drex.requests).toHaveLength(2);
+    expect(edited.modelSelection).toMatchObject({ model: "fast" });
+    expect(edited.modelSelection?.anchor).not.toBe(first.modelSelection?.anchor);
+    expect(JSON.stringify(edited.modelSelection)).not.toContain("edited");
+  });
+
   it("stores an anchor with no message text and selects again for a new human message", async () => {
     const { agent, drex } = agentOf({
       script: [
@@ -610,13 +681,19 @@ describe("naceModelSelectorMiddleware", () => {
       { messages: [new HumanMessage({ content: CANARY, id: "human_1" })] },
       thread,
     );
-    expect(first.modelSelection).toMatchObject({ anchor: "human_1", model: "strong" });
+    expect(first.modelSelection).toMatchObject({
+      anchor: selectionAnchor([new HumanMessage({ content: CANARY, id: "human_1" })]),
+      model: "strong",
+    });
     expect(JSON.stringify(first.modelSelection)).not.toContain(CANARY);
     const second = await agent.invoke(
       { messages: [new HumanMessage({ content: "next", id: "human_2" })] },
       thread,
     );
-    expect(second.modelSelection).toMatchObject({ anchor: "human_2", model: "fast" });
+    expect(second.modelSelection).toMatchObject({
+      anchor: selectionAnchor([new HumanMessage({ content: "next", id: "human_2" })]),
+      model: "fast",
+    });
     expect(drex.requests).toHaveLength(2);
   });
 
@@ -766,7 +843,7 @@ describe("naceModelSelectorMiddleware", () => {
       script: [{ status: 429, body: { error: { message: "slow down" } } }],
       extra: { plain: { model: pair('{"answer":"from-plain"}'), tools: false } },
       fallback: "plain",
-      base: pair('{"answer":"from-base"}'),
+      base: new StructuredReply("from-base", "tool"),
       fast: pair('{"answer":"from-fast"}'),
       strong: pair('{"answer":"from-strong"}'),
       responseFormat: z.object({ answer: z.string() }),
@@ -775,11 +852,130 @@ describe("naceModelSelectorMiddleware", () => {
       const result = await agent.invoke({ messages: [new HumanMessage("hello")] });
       expect(drex.requests).toHaveLength(1);
       expect(result.modelSelection).toMatchObject({ reason: "rate_limited", model: null });
-      expect(JSON.stringify(result)).toContain("from-base");
+      expect((result as { structuredResponse?: unknown }).structuredResponse).toEqual({
+        answer: "from-base",
+      });
+      expect(result.messages.filter((message) => AIMessage.isInstance(message))).toHaveLength(2);
       expect(JSON.stringify(result)).not.toContain("from-plain");
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("refuses a profile id that differs from the candidate key", () => {
+    const profile = {
+      id: "other",
+      provider: "openai",
+      priceIn: 1,
+      priceOut: 1,
+      context: 8,
+      tags: ["chat"],
+    };
+    expect(() =>
+      naceModelSelectorMiddleware({
+        candidates: {
+          fast: {
+            model: pair("fast"),
+            profile: profile as unknown as {
+              provider: string;
+              priceIn: number;
+              priceOut: number;
+              context: number;
+              tags: string[];
+            },
+          },
+        },
+      }),
+    ).toThrow(/profile id/);
+  });
+
+  it("does not call the handler when the run aborts after the model is initialized", async () => {
+    const reason = new Error("stop-before-handler");
+    const controller = new AbortController();
+    let calls = 0;
+    const counter = createMiddleware({
+      name: "Counter",
+      wrapModelCall: async (request, handler) => {
+        calls += 1;
+        return handler(request);
+      },
+    });
+    class GateModel extends ScriptedChatModel {
+      constructor() {
+        super([new AIMessage("nope")]);
+        // Promise.resolve awaits this, which is the model-init await in the middleware.
+        // biome-ignore lint/suspicious/noThenProperty: the await must abort before the handler
+        Object.defineProperty(this, "then", {
+          configurable: true,
+          value: (resolve: (model: BaseChatModel) => void) => {
+            delete (this as { then?: unknown }).then;
+            controller.abort(reason);
+            resolve(this);
+          },
+        });
+      }
+    }
+    const { agent } = agentOf({
+      script: [{ body: routeReply("strong", ["fast", "strong"]) }],
+      strong: new GateModel(),
+      middleware: [counter],
+    });
+    await expect(
+      agent.invoke({ messages: [new HumanMessage("hello")] }, { signal: controller.signal }),
+    ).rejects.toBe(reason);
+    expect(calls).toBe(0);
+  });
+
+  it("throws the abort reason when the handler settles after the run is aborted", async () => {
+    const reason = new Error("stop-during-handler");
+    const controller = new AbortController();
+    let release: () => void = () => {};
+    let started: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    class SlowModel extends ScriptedChatModel {
+      override async _generate(): Promise<ChatResult> {
+        started();
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        throw new Error("from-model");
+      }
+    }
+    const { agent } = agentOf({
+      script: [{ body: routeReply("strong", ["fast", "strong"]) }],
+      strong: new SlowModel([new AIMessage("nope")]),
+    });
+    const pending = agent
+      .invoke({ messages: [new HumanMessage("hello")] }, { signal: controller.signal })
+      .then(
+        () => ({ failed: false as const }),
+        (error: unknown) => ({ failed: true as const, error }),
+      );
+    await gate;
+    controller.abort(reason);
+    release();
+    const outcome = await pending;
+    expect(outcome.failed).toBe(true);
+    if (outcome.failed) {
+      expect(outcome.error).toBe(reason);
+      expect(String(outcome.error)).not.toContain("from-model");
+    }
+  });
+
+  it("keeps a provider-strategy structured response and the selection", async () => {
+    const { agent } = agentOf({
+      script: [{ body: routeReply("strong", ["fast", "strong"]) }],
+      strong: new StructuredReply("from-strong", "json"),
+      responseFormat: providerStrategy(z.object({ answer: z.string() })),
+    });
+    const result = await agent.invoke({ messages: [new HumanMessage("hello")] });
+    expect((result as { structuredResponse?: unknown }).structuredResponse).toEqual({
+      answer: "from-strong",
+    });
+    expect(result.modelSelection).toMatchObject({ model: "strong", reason: "selected" });
+    expect(result.messages.filter((message) => AIMessage.isInstance(message))).toHaveLength(1);
   });
 
   it("reuses a well formed stored selection and ignores a malformed one", async () => {
@@ -793,7 +989,7 @@ describe("naceModelSelectorMiddleware", () => {
       candidates: ["fast", "strong"],
       requestId: "req_abc12345",
       latencyMs: 4,
-      anchor: "human_1",
+      anchor: selectionAnchor([new HumanMessage({ content: "hello", id: "human_1" })]),
     };
     const malformed = [
       { ...valid, reason: "nope" },
@@ -803,6 +999,8 @@ describe("naceModelSelectorMiddleware", () => {
       { ...valid, fallback: "yes" },
       { ...valid, candidates: ["fast", 1] },
       { ...valid, model: null, reason: "nope", selected: null, fallback: true },
+      { ...valid, reason: "selected", model: "fast", selected: "strong", fallback: false },
+      { ...valid, reason: "selected", model: "fast", selected: "fast", fallback: true },
     ];
     const { agent, drex } = agentOf({
       script: [valid, ...malformed].map(() => ({

@@ -304,7 +304,7 @@ describe.skipIf(!KEY || !FIREWORKS_KEY)("a real LLM that obeys an injection (Fir
   it("is blocked by the gate on every injected delete", async () => {
     const { ran, tools } = ticketTools();
     const model = new ChatOpenAI({
-      model: process.env.NAIVE_AGENT_MODEL ?? "accounts/fireworks/models/gpt-oss-120b",
+      model: process.env.NAIVE_AGENT_MODEL ?? "accounts/fireworks/models/glm-5p3",
       apiKey: FIREWORKS_KEY,
       configuration: { baseURL: "https://api.fireworks.ai/inference/v1" },
       temperature: 0,

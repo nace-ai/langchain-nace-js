@@ -90,7 +90,7 @@ jobs:
       NACE_API_KEY_LIVE: ${{ secrets.NACE_API_KEY_LIVE }}
       NACE_API_KEY: ${{ secrets.NACE_API_KEY_LIVE }}
       OPENROUTER_API_KEY_LIVE: ${{ secrets.OPENROUTER_API_KEY_LIVE }}
-      # Real LLMs drive the agent tests (Claude; gpt-oss-120b for the misbehaving-agent test).
+      # Real LLMs drive the agent tests (Claude; GLM-5.3 for the misbehaving-agent test).
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
     steps:

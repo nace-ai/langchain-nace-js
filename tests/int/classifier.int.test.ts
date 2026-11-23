@@ -168,7 +168,12 @@ describe.skipIf(!KEY)("Drex contract", () => {
       });
       const r = await classifier.invoke("One image.", { images: [RED] });
       expect(classifier.model).toBe("drex-max");
-      expect(r.model).toBe("drex-max");
+      // Drex answers a retired id or an alias with a newer version, and the response
+      // reports that version. The catalog names it in `alias_for`.
+      const client = new NaceClient({ apiKey: KEY, ...(BASE_URL ? { baseURL: BASE_URL } : {}) });
+      const entry = (await client.models.list()).find((m) => m.name === classifier.model);
+      expect(entry).toBeDefined();
+      expect(r.model).toBe(entry?.alias_for ?? classifier.model);
       expect(r.nouls.red!.noul).toBeGreaterThan(0.7);
     });
   });

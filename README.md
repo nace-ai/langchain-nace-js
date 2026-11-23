@@ -194,7 +194,7 @@ import { createAgent } from "langchain";
 import { NaceModelSelector } from "@nace-ai/langchain-nace";
 import { naceModelSelectorMiddleware } from "@nace-ai/langchain-nace/middleware";
 
-const selector = new NaceModelSelector({ timeout: 60_000 });
+const selector = new NaceModelSelector();
 const agent = createAgent({
   model: fast,
   tools: [],
@@ -205,7 +205,6 @@ const agent = createAgent({
         "anthropic/claude-haiku-5.5": { model: strong },
       },
       fallback: "openai/gpt-4o-mini",
-      timeout: 60_000,
       selector,
     }),
   ],
